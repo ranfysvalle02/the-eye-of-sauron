@@ -1,5 +1,7 @@
 # the-eye-of-sauron
 
+![](sauron.png)
+
 ---
 
 **Behold “The Eye of Sauron”—an AI sentinel that never blinks.** Inspired by the all-seeing tower from Tolkien’s legend, this project constantly scans the web for your chosen keywords, highlights hidden gems, and serves up bite-sized insights you can act on in seconds.  

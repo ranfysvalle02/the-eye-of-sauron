@@ -1,6 +1,6 @@
 # the-eye-of-sauron
 
-![](sauron.png)
+![](git-sauron.png)
 
 ---
 

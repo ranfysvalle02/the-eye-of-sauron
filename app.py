@@ -15,10 +15,44 @@ from flask import Flask, Response, request, jsonify, render_template_string
 import requests
 from functools import reduce
 import operator
+from pymongo import MongoClient, DESCENDING
+from pymongo.errors import ConnectionFailure
 
 # --- Initialization & Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 load_dotenv()
+
+# --- MongoDB Atlas Logging & Analytics Configuration ---
+MDB_URI = os.getenv("MDB_URI")
+mongo_client = None
+log_collection = None
+daily_stats_collection = None
+
+if MDB_URI:
+    try:
+        # Set a connection timeout to avoid long waits
+        mongo_client = MongoClient(MDB_URI, serverSelectionTimeoutMS=5000)
+        # The ismaster command is cheap and does not require auth, used to validate the connection.
+        mongo_client.admin.command('ismaster')
+        db = mongo_client.sauron_logs
+        
+        # Collection for immutable event logs (source of truth)
+        log_collection = db.events
+        # Create index for faster ad-hoc investigations
+        log_collection.create_index([("timestamp", DESCENDING)])
+        
+        # New collection for high-performance daily analytics
+        daily_stats_collection = db.daily_stats
+        
+        logging.info("✅ Successfully connected to MongoDB Atlas for logging and analytics.")
+    except ConnectionFailure as e:
+        logging.error(f"❌ Could not connect to MongoDB Atlas: {e}. Logging and analytics on MongoDB Atlas will be disabled.")
+        mongo_client = None
+        log_collection = None
+        daily_stats_collection = None
+else:
+    logging.info("ℹ️ MDB_URI not set. Analytics will be stored in the browser's localStorage.")
+
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
@@ -152,6 +186,89 @@ CONTENT_SUMMARY_SYSTEM_PROMPT = """You are an expert AI analyst. Your task is to
 Your summary will be displayed in a web UI, so it must be professional and easy to read."""
 
 # --- Core Application Logic ---
+def log_event_and_update_stats(event_type, details):
+    """Logs an event and updates stats, falling back to client-side localStorage if MongoDB is disabled."""
+    # If MongoDB is not configured, send an event to the client for local processing.
+    if log_collection is None or daily_stats_collection is None:
+        update_queue.put({
+            "type": "local_analytics_update",
+            "eventType": event_type,
+            "details": details
+        })
+        return
+
+    now = datetime.utcnow()
+    # 1. Log to the immutable 'events' collection (the source of truth)
+    try:
+        log_document = {
+            "timestamp": now,
+            "eventType": event_type,
+            "details": details
+        }
+        log_collection.insert_one(log_document)
+    except Exception as e:
+        logging.error(f"Failed to log to events collection: {e}")
+        # Continue to attempt the stats update even if event logging fails
+    
+    # 2. Atomically update the 'daily_stats' collection for analytics
+    try:
+        date_str = now.strftime('%Y-%m-%d')
+        hour_str = str(now.hour)
+
+        inc_op = {}
+
+        # Build the increment operation based on the event type
+        if event_type == 'scan_started':
+            source_name = details.get('sourceName', 'Unknown')
+            source_name_safe = source_name.replace('.', '_').replace('$', '_')
+            inc_op = {
+                'totalScansStarted': 1,
+                f'scansBySource.{source_name_safe}': 1
+            }
+        elif event_type == 'item_matched':
+            source_name = details.get('sourceName', 'Unknown')
+            label = details.get('matchedLabel', 'Unknown')
+            source_name_safe = source_name.replace('.', '_').replace('$', '_')
+            label_safe = label.replace('.', '_').replace('$', '_')
+            inc_op = {
+                'totalItemsMatched': 1,
+                f'hourlyActivity.{hour_str}': 1,
+                f'matchesByLabel.{label_safe}': 1,
+                f'matchesBySourceLabel.{source_name_safe}.{label_safe}': 1
+            }
+        elif event_type == 'summary_generated' and details.get('success'):
+            inc_op = {
+                'totalSummariesGenerated': 1
+            }
+        
+        # Only perform a database write if there is a statistic to update
+        if not inc_op:
+            return
+
+        # *** FIX ***
+        # By removing the objects that are modified by $inc from $setOnInsert,
+        # we prevent the "path conflict" error during an upsert. MongoDB's $inc
+        # operator will create the nested object structure (e.g., matchesByLabel)
+        # automatically on the first operation, leveraging the flexible document model.
+        update_op = {
+            '$inc': inc_op,
+            '$setOnInsert': {
+                '_id': date_str,
+                'date': date_str
+            }
+        }
+        
+        daily_stats_collection.update_one(
+            {'_id': date_str},
+            update_op,
+            upsert=True
+        )
+
+    except Exception as e:
+        # Adding more context to the error log
+        logging.error(f"Failed to update daily stats in MongoDB: {e}, full error: {getattr(e, 'details', {})}")
+
+
 def get_nested_value(data_dict, key_string):
     """Safely retrieves a value from a nested dictionary using dot notation."""
     if not key_string:
@@ -196,6 +313,11 @@ def get_llm_summary(client, prompt_text, model_deployment):
 
 def process_and_queue_api_item(item, matched_label, source_config):
     logging.info(f"✅ API MATCH: Item from '{source_config['name']}' matched '{matched_label}'. Processing...")
+    log_event_and_update_stats("item_matched", {
+        "sourceName": source_config.get('name'),
+        "matchedLabel": matched_label,
+        "itemId": str(get_nested_value(item, source_config.get('fieldMappings', {}).get('id')))
+    })
 
     mappings = source_config.get('fieldMappings', {})
     time_str = str(get_nested_value(item, mappings.get('time', '')))
@@ -243,6 +365,15 @@ def process_and_queue_api_item(item, matched_label, source_config):
         f"## API Content to Analyze (from {source_config['name']})\n\n{content_to_summarize}"
     )
     ai_summary = get_llm_summary(client, prompt_text, DEPLOYMENT)
+    
+    summary_successful = not ai_summary.startswith("[Error:") and not ai_summary.startswith("[Status:")
+    log_event_and_update_stats("summary_generated", {
+        "sourceName": source_config.get('name'),
+        "itemId": item_data["id"],
+        "success": summary_successful,
+        "error": ai_summary if not summary_successful else None
+    })
+
     update_queue.put({
         "type": "summary_update",
         "id": item_data["id"],
@@ -269,6 +400,7 @@ def perform_api_scan(source_config, start_page=1):
     source_name = source_config.get('name', 'Unknown Source')
     update_queue.put({"type": "status", "status": "scanning", "reason": f"Starting scan for {source_name}...", "source_name": source_name})
     logging.info(f"API SCAN: Starting for source '{source_name}' from page {start_page}...")
+    log_event_and_update_stats("scan_started", {"sourceName": source_name, "startPage": start_page})
 
     api_url_template = source_config.get('apiUrl')
     if not api_url_template:
@@ -318,6 +450,7 @@ def perform_api_scan(source_config, start_page=1):
                 if not isinstance(items, list) or not items:
                     logging.info(f"No more items found for source '{source_name}'.")
                     update_queue.put({"type": "status", "status": "idle", "reason": f"Scan of {source_name} complete."})
+                    log_event_and_update_stats("scan_completed", {"sourceName": source_name, "reason": "no_more_items", "pagesScanned": i})
                     return
 
                 for item in items:
@@ -335,6 +468,7 @@ def perform_api_scan(source_config, start_page=1):
             if is_scan_cancelled.is_set():
                 logging.info(f"Scan for {source_name} was cancelled by user.")
                 update_queue.put({"type": "status", "status": "idle", "reason": f"Scan for {source_name} cancelled."})
+                log_event_and_update_stats("scan_cancelled", {"sourceName": source_name})
                 return
 
             logging.info(f"Scan paused after reaching page limit of {PAGES_PER_SCAN}.")
@@ -345,13 +479,16 @@ def perform_api_scan(source_config, start_page=1):
                 "reason": f"Paused after scanning {PAGES_PER_SCAN} pages.",
                 "next_page": current_page
             })
+            log_event_and_update_stats("scan_paused_limit", {"sourceName": source_name, "nextPage": current_page})
 
     except requests.RequestException as e:
         logging.error(f"API SCAN: Failed to fetch from {source_name}: {e}")
         update_queue.put({"type": "status", "status": "error", "reason": f"Failed to fetch data: {e}"})
+        log_event_and_update_stats("scan_error", {"sourceName": source_name, "error": str(e)})
     except Exception as e:
         logging.error(f"API SCAN: An unexpected error occurred: {e}", exc_info=True)
         update_queue.put({"type": "status", "status": "error", "reason": f"An unexpected error occurred: {e}"})
+        log_event_and_update_stats("scan_error", {"sourceName": source_name, "error": str(e)})
 
 
 # --- Flask Routes ---
@@ -382,6 +519,7 @@ def update_search_patterns(patterns_list):
     with patterns_lock:
         SEARCH_PATTERNS = new_patterns
         logging.info(f"Updated search patterns. Now monitoring {len(SEARCH_PATTERNS)} patterns.")
+        log_event_and_update_stats("config_update", {"configType": "patterns", "count": len(SEARCH_PATTERNS)})
 
 @app.route('/patterns', methods=['GET', 'POST'])
 def manage_patterns():
@@ -417,6 +555,7 @@ def update_api_sources(sources_list):
     with sources_lock:
         API_SOURCES = new_sources
         logging.info(f"Updated API Sources. Now have {len(API_SOURCES)} sources configured.")
+        log_event_and_update_stats("config_update", {"configType": "api_sources", "count": len(API_SOURCES)})
 
 @app.route('/api-sources', methods=['GET', 'POST'])
 def manage_api_sources():
@@ -556,9 +695,11 @@ def send_to_slack():
         response = requests.post(webhook_url, json=slack_payload, timeout=10)
         response.raise_for_status()
         logging.info(f"Successfully sent item {item.get('id')} to Slack.")
+        log_event_and_update_stats("slack_notification_sent", {"itemId": item.get('id'), "success": True})
         return jsonify({"status": "success"})
     except requests.RequestException as e:
         logging.error(f"Error sending to Slack: {e}")
+        log_event_and_update_stats("slack_notification_failed", {"itemId": item.get('id'), "success": False, "error": str(e)})
         return jsonify({"error": f"Failed to send to Slack: {e}"}), 500
     except Exception as e:
         logging.error(f"An unexpected error occurred in send_to_slack: {e}")
@@ -598,6 +739,55 @@ def preview_api_source():
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Failed to fetch data: {str(e)}"}), 500
 
+# --- Analytics Route ---
+@app.route('/analytics/daily-stats', methods=['GET'])
+def get_daily_stats():
+    """
+    Provides aggregated daily statistics. If MongoDB is disabled, instructs the client to use localStorage.
+    This function is designed to be robust against missing data fields in the database,
+    ensuring a complete and valid structure is always returned to the frontend.
+    """
+    if daily_stats_collection is None:
+        # Instruct the client to use its local storage for analytics.
+        return jsonify({"use_local_storage": True})
+
+    date_str = request.args.get('date', datetime.utcnow().strftime('%Y-%m-%d'))
+    
+    try:
+        # Start with a complete default structure that the frontend expects.
+        final_stats = {
+            '_id': date_str,
+            'date': date_str,
+            'totalScansStarted': 0,
+            'totalItemsMatched': 0,
+            'totalSummariesGenerated': 0,
+            'scansBySource': {},
+            'matchesByLabel': {},
+            'matchesBySourceLabel': {},
+            'hourlyActivity': {str(h): 0 for h in range(24)}
+        }
+        
+        stats_from_db = daily_stats_collection.find_one({'_id': date_str})
+
+        if stats_from_db:
+            # Intelligently merge the data from the DB into the default structure.
+            final_stats['totalScansStarted'] = stats_from_db.get('totalScansStarted', 0)
+            final_stats['totalItemsMatched'] = stats_from_db.get('totalItemsMatched', 0)
+            final_stats['totalSummariesGenerated'] = stats_from_db.get('totalSummariesGenerated', 0)
+            final_stats['scansBySource'] = stats_from_db.get('scansBySource', {})
+            final_stats['matchesByLabel'] = stats_from_db.get('matchesByLabel', {})
+            final_stats['matchesBySourceLabel'] = stats_from_db.get('matchesBySourceLabel', {})
+            
+            # For the nested hourly activity, update the default dictionary with values from the DB.
+            if 'hourlyActivity' in stats_from_db and isinstance(stats_from_db['hourlyActivity'], dict):
+                final_stats['hourlyActivity'].update(stats_from_db['hourlyActivity'])
+
+        return jsonify(final_stats)
+
+    except Exception as e:
+        logging.error(f"Failed to fetch daily stats: {e}")
+        return jsonify({"error": "An error occurred while fetching analytics data."}), 500
+
 # --- HTML Template ---
 HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
     <meta charset="UTF-8">
@@ -607,6 +797,11 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <link rel="stylesheet" type="text/css" href="https://npmcdn.com/flatpickr/dist/themes/dark.css">
+
     <style>
         :root {
             --brand-green: #00ED64;
@@ -692,7 +887,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             0%, 100% { border-color: var(--brand-green); }
             50% { border-color: #4A5568; }
         }
-        /* New styles for API Previewer */
         .preview-tab-btn {
             padding: 0.5rem 1rem; border-radius: 6px; background-color: var(--bg-dark-secondary);
             border: 1px solid var(--border-color); transition: all 0.2s;
@@ -720,12 +914,9 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             0%, 100% { background-color: #374151; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
             50% { background-color: var(--brand-blue); color: white; box-shadow: 0 0 10px 5px rgba(59, 130, 246, 0.4); }
         }
-        /* Styles for new checkboxes in previewer */
         .json-entry-label { display: flex; align-items: center; cursor: pointer; width: 100%; border-radius: 3px; padding: 2px 0; }
         .json-entry-label:hover { background-color: rgba(255, 255, 255, 0.05); }
         .json-checkbox { margin-right: 0.75rem; accent-color: var(--brand-green); width: 14px; height: 14px; }
-        
-        /* New styles for Quick Add accordion */
         #quick-add-toggle .fa-chevron-right { transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
         #quick-add-toggle.active .fa-chevron-right { transform: rotate(90deg); }
         .quick-add-container {
@@ -735,7 +926,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             margin-top: 0 !important;
         }
         .quick-add-container.active {
-            max-height: 500px; /* Adjust as needed for content */
+            max-height: 500px;
             opacity: 1;
             margin-top: 0.75rem !important;
         }
@@ -749,6 +940,45 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 opacity: 1;
                 transform: translateY(0);
             }
+        }
+        /* Dashboard & View Styles */
+        .view-tab-btn {
+            padding: 0.75rem 1.25rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s ease-in-out;
+        }
+        .view-tab-btn:hover {
+            color: var(--text-primary);
+        }
+        .view-tab-btn.active-view-tab {
+            color: var(--brand-green);
+            border-bottom-color: var(--brand-green);
+        }
+        .stats-table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        .stats-table th, .stats-table td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .stats-table thead {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        .stats-table th {
+            text-align: left;
+            font-weight: 600;
+        }
+        .stats-table th.sortable {
+            cursor: pointer;
+        }
+        .stats-table th.sortable:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        .stats-table tbody tr:hover {
+            background-color: rgba(255, 255, 255, 0.03);
         }
     </style>
 </head>
@@ -776,56 +1006,115 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             </div>
         </div>
     </header>
-    <main class="flex-1 flex flex-col md:flex-row overflow-hidden">
-        <aside class="w-full md:w-1/3 lg:w-1/4 p-4 border-r brand-border overflow-y-auto flex flex-col">
-            <div>
-                <div class="flex justify-between items-center">
-                    <h2 class="text-lg font-semibold">Manage Listeners</h2>
-                    <button id="show-add-listener-modal-btn"
-                        class="px-3 py-1 text-sm font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
-                        <i class="fa-solid fa-plus mr-2"></i>New
-                    </button>
-                </div>
-                <div id="listeners-list" class="mt-2 flex-1 space-y-2 overflow-y-auto pr-2"></div>
-            </div>
-            <div class="sidebar-section">
-                <div class="flex justify-between items-center">
-                    <h2 class="text-lg font-semibold">Manage API Sources</h2>
-                    <button id="show-add-source-modal-btn"
-                        class="px-3 py-1 text-sm font-semibold rounded-md bg-blue-800 hover:bg-blue-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
-                        <i class="fa-solid fa-plus mr-2"></i>New
-                    </button>
-                </div>
-                <div class="flex items-center gap-2 mt-2">
-                    <button id="scan-all-sources-btn"
-                        class="px-3 py-1 text-sm font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
-                        <i class="fa-solid fa-play mr-2"></i>Scan All
-                    </button>
-                </div>
-                <div id="sources-list" class="mt-2 flex-1 space-y-2 overflow-y-auto pr-2"></div>
-                
-                <div class="mt-4 border-t brand-border pt-4">
-                    <button id="quick-add-toggle" class="w-full flex justify-between items-center text-left text-base font-semibold text-indigo-300 hover:text-indigo-200 transition-colors">
-                        <span><i class="fa-solid fa-wand-magic-sparkles mr-2"></i> Quick Add from Template</span>
-                        <i class="fa-solid fa-chevron-right"></i>
-                    </button>
-                    <div id="sidebar-source-templates-container" class="quick-add-container mt-2 space-y-3">
-                    </div>
-                </div>
 
-            </div>
-        </aside>
-        <div id="feed-container" class="flex-1 h-full overflow-y-auto p-4 md:p-6 lg:p-8 space-y-6">
-            <div id="controls-container"
-                class="sticky top-4 z-10 p-4 rounded-lg flex flex-col items-center justify-center gap-2 text-center transition-all duration-300">
-            </div>
-            <div id="placeholder" class="text-center text-gray-500 pt-16 transition-opacity duration-300">
-                <i class="fas fa-search fa-3x"></i>
-                <p class="mt-4 text-lg">No scan in progress.</p>
-                <p class="text-sm">Select an API source from the sidebar and press <i class="fa-solid fa-play"></i> to begin.</p>
+    <div class="border-b brand-border flex items-center px-4 space-x-2">
+        <button class="view-tab-btn active-view-tab" data-view="scanner-view"><i class="fa-solid fa-stream mr-2"></i>Scanner Feed</button>
+        <button class="view-tab-btn" data-view="dashboard-view"><i class="fa-solid fa-chart-line mr-2"></i>Analytics Dashboard</button>
+    </div>
+
+    <main class="flex-1 flex flex-col md:flex-row overflow-hidden">
+        <div id="scanner-view" class="flex-1 flex flex-col md:flex-row overflow-hidden view-content">
+            <aside class="w-full md:w-1/3 lg:w-1/4 p-4 border-r brand-border overflow-y-auto flex flex-col">
+                <div>
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-lg font-semibold">Manage Listeners</h2>
+                        <button id="show-add-listener-modal-btn"
+                            class="px-3 py-1 text-sm font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
+                            <i class="fa-solid fa-plus mr-2"></i>New
+                        </button>
+                    </div>
+                    <div id="listeners-list" class="mt-2 flex-1 space-y-2 overflow-y-auto pr-2"></div>
+                </div>
+                <div class="sidebar-section">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-lg font-semibold">Manage API Sources</h2>
+                        <button id="show-add-source-modal-btn"
+                            class="px-3 py-1 text-sm font-semibold rounded-md bg-blue-800 hover:bg-blue-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
+                            <i class="fa-solid fa-plus mr-2"></i>New
+                        </button>
+                    </div>
+                    <div class="flex items-center gap-2 mt-2">
+                        <button id="scan-all-sources-btn"
+                            class="px-3 py-1 text-sm font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
+                            <i class="fa-solid fa-play mr-2"></i>Scan All
+                        </button>
+                    </div>
+                    <div id="sources-list" class="mt-2 flex-1 space-y-2 overflow-y-auto pr-2"></div>
+                    
+                    <div class="mt-4 border-t brand-border pt-4">
+                        <button id="quick-add-toggle" class="w-full flex justify-between items-center text-left text-base font-semibold text-indigo-300 hover:text-indigo-200 transition-colors">
+                            <span><i class="fa-solid fa-wand-magic-sparkles mr-2"></i> Quick Add from Template</span>
+                            <i class="fa-solid fa-chevron-right"></i>
+                        </button>
+                        <div id="sidebar-source-templates-container" class="quick-add-container mt-2 space-y-3">
+                        </div>
+                    </div>
+
+                </div>
+            </aside>
+            <div id="feed-container" class="flex-1 h-full overflow-y-auto p-4 md:p-6 lg:p-8 space-y-6">
+                <div id="controls-container"
+                    class="sticky top-4 z-10 p-4 rounded-lg flex flex-col items-center justify-center gap-2 text-center transition-all duration-300">
+                </div>
+                <div id="placeholder" class="text-center text-gray-500 pt-16 transition-opacity duration-300">
+                    <i class="fas fa-search fa-3x"></i>
+                    <p class="mt-4 text-lg">No scan in progress.</p>
+                    <p class="text-sm">Select an API source from the sidebar and press <i class="fa-solid fa-play"></i> to begin.</p>
+                </div>
             </div>
         </div>
+        <div id="dashboard-view" class="hidden flex-1 flex-col overflow-y-auto p-4 md:p-6 lg:p-8 space-y-6 view-content">
+            <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
+                <h2 class="text-2xl font-bold">Daily Analytics</h2>
+                <input id="analytics-date-picker" class="p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500" type="text" placeholder="Select Date">
+            </div>
+            
+            <div id="dashboard-kpi-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-blue-900/70 rounded-lg"><i class="fa-solid fa-search fa-2x text-blue-400"></i></div>
+                    <div>
+                        <p class="text-sm text-gray-400">Scans Started</p>
+                        <p id="kpi-scans-started" class="text-3xl font-bold">0</p>
+                    </div>
+                </div>
+                <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-green-900/70 rounded-lg"><i class="fa-solid fa-check-double fa-2x text-green-400"></i></div>
+                    <div>
+                        <p class="text-sm text-gray-400">Items Matched</p>
+                        <p id="kpi-items-matched" class="text-3xl font-bold">0</p>
+                    </div>
+                </div>
+                <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-indigo-900/70 rounded-lg"><i class="fa-solid fa-wand-magic-sparkles fa-2x text-indigo-400"></i></div>
+                    <div>
+                        <p class="text-sm text-gray-400">Summaries Generated</p>
+                        <p id="kpi-summaries-generated" class="text-3xl font-bold">0</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+                <div class="lg:col-span-3 brand-dark-bg border brand-border rounded-lg p-5 shadow-lg">
+                    <h3 class="font-semibold mb-4">Hourly Activity (Matches)</h3>
+                    <div id="hourly-activity-chart-container" class="h-64 relative"></div>
+                </div>
+                <div class="lg:col-span-2 brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex flex-col">
+                    <h3 class="font-semibold mb-4">Matches by Label</h3>
+                    <div id="matches-by-label-chart-container" class="flex-grow flex items-center justify-center h-64 relative"></div>
+                </div>
+            </div>
+            
+            <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="font-semibold">Breakdown by Source & Label</h3>
+                    <input type="text" id="source-label-table-search" placeholder="Search..." class="p-2 text-sm rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="overflow-x-auto"><table id="source-label-table" class="stats-table w-full text-sm text-left"></table></div>
+            </div>
+            
+        </div>
     </main>
+
     <div id="listener-modal"
         class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
         <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-lg mx-4 modal-content transform scale-95">
@@ -953,13 +1242,18 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
     <script>
     document.addEventListener('DOMContentLoaded', () => {
         const ui = {
+            // Scanner View
+            scannerView: document.getElementById('scanner-view'),
             feedContainer: document.getElementById('feed-container'),
             statusText: document.getElementById('status-text'),
             statusDot: document.getElementById('status-dot'),
             placeholder: document.getElementById('placeholder'),
             controlsContainer: document.getElementById('controls-container'),
+            globalStopBtn: document.getElementById('global-stop-btn'),
+            // Config
             slackWebhookUrlInput: document.getElementById('slack-webhook-url'),
             saveWebhookBtn: document.getElementById('save-webhook-btn'),
+            // Listeners
             listenersList: document.getElementById('listeners-list'),
             listenerModal: document.getElementById('listener-modal'),
             listenerForm: document.getElementById('listener-form'),
@@ -975,6 +1269,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             regexValidityIndicator: document.getElementById('regex-validity-indicator'),
             regexTestString: document.getElementById('regex-test-string'),
             regexTestResult: document.getElementById('regex-test-result'),
+            // Sources
             sourcesList: document.getElementById('sources-list'),
             sourceModal: document.getElementById('source-modal'),
             sourceForm: document.getElementById('source-form'),
@@ -1000,8 +1295,15 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             mappingInputsContainer: document.getElementById('mapping-inputs-container'),
             quickAddToggle: document.getElementById('quick-add-toggle'),
             sidebarSourceTemplatesContainer: document.getElementById('sidebar-source-templates-container'),
-            globalStopBtn: document.getElementById('global-stop-btn'),
+            // Dashboard View
+            dashboardView: document.getElementById('dashboard-view'),
+            analyticsDatePicker: document.getElementById('analytics-date-picker'),
+            kpiScansStarted: document.getElementById('kpi-scans-started'),
+            kpiItemsMatched: document.getElementById('kpi-items-matched'),
+            kpiSummariesGenerated: document.getElementById('kpi-summaries-generated'),
         };
+        
+        // --- State Management ---
         let currentPatterns = [];
         let apiSources = [];
         let sourceTemplates = [];
@@ -1013,6 +1315,13 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         let currentFieldsToCheck = [];
         const requiredMappings = ["id", "title", "url", "text", "by", "time"];
         let listenerFormValidity = { label: false, pattern: false };
+        let clientSideStop = false; // Flag to make stop action immediate
+
+        // --- Dashboard & Local Storage Analytics ---
+        let dashboardCharts = { hourly: null, labels: null };
+        let currentAnalyticsDate = new Date().toISOString().split('T')[0];
+        let tableSortState = {};
+        let isMongoDbEnabled = true; // Assume true until told otherwise
 
         const debounce = (func, delay) => {
             let timeoutId;
@@ -1294,18 +1603,18 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                     handleApplyTemplate(applyBtn);
                     return;
                 }
+                const tabBtn = e.target.closest('.view-tab-btn');
+                if(tabBtn) {
+                    handleViewSwitch(tabBtn.dataset.view);
+                }
             });
             ui.sourcesList.addEventListener('click', (e) => {
                 const scanBtn = e.target.closest('.scan-btn');
                 const pauseBtn = e.target.closest('.pause-btn');
                 const resumeBtn = e.target.closest('.resume-btn');
-                // The main stop button is now global, but we can keep this for redundancy if wanted.
-                // For now, removing the per-item stop button to avoid confusion.
-                // const stopBtn = e.target.closest('.stop-btn');
                 if (scanBtn) startScan(scanBtn.dataset.name, 1);
                 if (pauseBtn) handlePauseScan();
                 if (resumeBtn) handleResumeScan();
-                // if (stopBtn) handleStopScan();
             });
             ui.scanAllSourcesBtn.addEventListener('click', scanAllSources);
             ui.feedContainer.addEventListener('click', handleFeedActions);
@@ -1575,12 +1884,11 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                             <div class="scan-beam"></div>
                         </div>
                         <p class="text-sm text-gray-400 mt-4">${data.reason || 'Scanning...'}</p>
-                        <button id="main-feed-stop-btn" class="mt-4 px-5 py-2 font-semibold rounded-md bg-red-700 hover:bg-red-600 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"><i class="fa-solid fa-stop mr-2"></i>Stop</button>
                     `;
-                    document.getElementById('main-feed-stop-btn').addEventListener('click', handleStopScan);
                     break;
                 case 'scan_paused':
                     controls.innerHTML = `
+                        <img src="https://github.com/ranfysvalle02/the-eye-of-sauron/blob/main/sauron-eye.png?raw=true" style="width:20%;" alt="Scan Paused" class="mx-auto mb-4">
                         <p class="text-lg font-semibold text-yellow-400 mb-3">${data.reason}</p>
                         <div class="flex items-center gap-4">
                             <button id="continue-scan-btn" class="px-6 py-2 font-semibold rounded-md bg-blue-700 hover:bg-blue-600 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"><i class="fa-solid fa-forward mr-2"></i>Continue Scan</button>
@@ -1605,8 +1913,10 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         const handleResumeScan = () => handleControlAction('/resume-scan');
         const handleResumeOperations = () => handleControlAction('/resume-operations');
         async function handleStopScan() {
+            // Immediately update UI for a responsive feel & set flag to ignore stale messages
+            clientSideStop = true;
+            handleStatusUpdate({status: 'idle', reason: 'Scan cancelled by user.'});
             await handleControlAction('/cancel-scan');
-            handleStatusUpdate({status: 'idle', reason: 'Scan cancelled.'});
         }
         async function handleFeedActions(e) {
             const sendBtn = e.target.closest('.send-to-slack-btn');
@@ -1668,7 +1978,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             }
         }
         
-        // --- API Previewer & Mapper Functions ---
         async function handleApplyTemplate(button) {
             const templateId = button.dataset.templateId;
             const template = sourceTemplates.find(t => t.id === templateId);
@@ -1692,7 +2001,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 return;
             }
 
-            // Calculate final config
             let finalApiUrl = template.config.apiUrl;
             let finalName = template.config.name;
             for (const [key, value] of Object.entries(replacements)) {
@@ -1702,7 +2010,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
 
             openModal('source');
 
-            // Populate the modal form with the template data
             ui.sourceNameInput.value = finalName;
             ui.sourceApiUrlInput.value = finalApiUrl;
             ui.sourceDataRootInput.value = template.config.dataRoot || '';
@@ -1711,11 +2018,9 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             ui.sourceFieldMappingsTextarea.value = JSON.stringify(template.config.fieldMappings || {}, null, 2);
             populateMappingsFromTextarea();
             
-            // Collapse the sidebar section
             ui.quickAddToggle.classList.remove('active');
             ui.sidebarSourceTemplatesContainer.classList.remove('active');
 
-            // Automatically trigger the preview after the modal animation
             setTimeout(() => {
                 handleFetchPreview();
             }, 350);
@@ -1954,16 +2259,302 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             ui.sourceFieldsToCheckTextarea.value = currentFieldsToCheck.join('\\n');
         }
 
-        // --- End of API Previewer Functions ---
+        // --- View Switching ---
+        function handleViewSwitch(viewId) {
+            document.querySelectorAll('.view-content').forEach(v => v.classList.add('hidden'));
+            document.getElementById(viewId).classList.remove('hidden');
+
+            document.querySelectorAll('.view-tab-btn').forEach(b => b.classList.remove('active-view-tab'));
+            document.querySelector(`.view-tab-btn[data-view="${viewId}"]`).classList.add('active-view-tab');
+
+            if (viewId === 'dashboard-view') {
+                fetchAndRenderDashboard(currentAnalyticsDate);
+            }
+        }
         
+        // --- Dashboard & localStorage Analytics ---
+        function getDefaultStatsObject(dateStr) {
+            return {
+                '_id': dateStr,
+                'date': dateStr,
+                'totalScansStarted': 0,
+                'totalItemsMatched': 0,
+                'totalSummariesGenerated': 0,
+                'scansBySource': {},
+                'matchesByLabel': {},
+                'matchesBySourceLabel': {},
+                'hourlyActivity': Object.fromEntries(Array.from({ length: 24 }, (_, i) => [i.toString(), 0]))
+            };
+        }
+
+        function getStatsFromLocalStorage(dateStr) {
+            const storedStats = localStorage.getItem(`analytics_${dateStr}`);
+            return storedStats ? JSON.parse(storedStats) : getDefaultStatsObject(dateStr);
+        }
+
+        function updateStatsWithEvent(stats, eventType, details) {
+            const newStats = JSON.parse(JSON.stringify(stats)); // Deep copy
+            const now = new Date();
+            const hourStr = now.getUTCHours().toString();
+
+            const sanitizeKey = (key) => String(key).replace(/\./g, '_').replace(/\$/g, '_');
+
+            if (eventType === 'scan_started') {
+                const sourceName = details.sourceName || 'Unknown';
+                const sourceNameSafe = sanitizeKey(sourceName);
+                newStats.totalScansStarted += 1;
+                newStats.scansBySource[sourceNameSafe] = (newStats.scansBySource[sourceNameSafe] || 0) + 1;
+            } else if (eventType === 'item_matched') {
+                const sourceName = details.sourceName || 'Unknown';
+                const label = details.matchedLabel || 'Unknown';
+                const sourceNameSafe = sanitizeKey(sourceName);
+                const labelSafe = sanitizeKey(label);
+
+                newStats.totalItemsMatched += 1;
+                newStats.hourlyActivity[hourStr] = (newStats.hourlyActivity[hourStr] || 0) + 1;
+                newStats.matchesByLabel[labelSafe] = (newStats.matchesByLabel[labelSafe] || 0) + 1;
+                if (!newStats.matchesBySourceLabel[sourceNameSafe]) {
+                    newStats.matchesBySourceLabel[sourceNameSafe] = {};
+                }
+                newStats.matchesBySourceLabel[sourceNameSafe][labelSafe] = (newStats.matchesBySourceLabel[sourceNameSafe][labelSafe] || 0) + 1;
+            } else if (eventType === 'summary_generated' && details.success) {
+                newStats.totalSummariesGenerated += 1;
+            }
+            return newStats;
+        }
+
+        function handleLocalAnalyticsUpdate(data) {
+            const dateStr = new Date().toISOString().split('T')[0];
+            const currentStats = getStatsFromLocalStorage(dateStr);
+            const updatedStats = updateStatsWithEvent(currentStats, data.eventType, data.details);
+            localStorage.setItem(`analytics_${dateStr}`, JSON.stringify(updatedStats));
+
+            const isDashboardActive = !ui.dashboardView.classList.contains('hidden');
+            if (isDashboardActive && currentAnalyticsDate === dateStr) {
+                renderDashboard(updatedStats);
+            }
+        }
+
+        function initDashboard() {
+            flatpickr(ui.analyticsDatePicker, {
+                dateFormat: "Y-m-d",
+                defaultDate: "today",
+                theme: "dark",
+                onChange: function(selectedDates, dateStr, instance) {
+                    currentAnalyticsDate = dateStr;
+                    fetchAndRenderDashboard(dateStr);
+                },
+            });
+            fetchAndRenderDashboard(currentAnalyticsDate);
+        }
+
+        function renderDashboard(stats) {
+            renderKpiCards(stats);
+            renderHourlyChart(stats.hourlyActivity);
+            renderLabelChart(stats.matchesByLabel);
+            
+            const sourceLabelData = [];
+            for (const [source, labels] of Object.entries(stats.matchesBySourceLabel || {})) {
+                for (const [label, count] of Object.entries(labels)) {
+                    sourceLabelData.push({ source: source.replace(/_/g,'.'), label: label.replace(/_/g,'.'), count });
+                }
+            }
+            
+            renderInteractiveTable(
+                'source-label-table', 
+                'source-label-table-search',
+                sourceLabelData, 
+                [
+                    { key: 'source', title: 'Source' },
+                    { key: 'label', title: 'Label' },
+                    { key: 'count', title: 'Count' }
+                ]
+            );
+        }
+
+        async function fetchAndRenderDashboard(dateStr) {
+            try {
+                const response = await fetch(`/analytics/daily-stats?date=${dateStr}`);
+                if (!response.ok) throw new Error('Failed to load stats');
+                const data = await response.json();
+
+                if (data.use_local_storage) {
+                    isMongoDbEnabled = false;
+                    console.info("MongoDB is disabled. Using localStorage for analytics.");
+                    const localStats = getStatsFromLocalStorage(dateStr);
+                    renderDashboard(localStats);
+                } else {
+                    isMongoDbEnabled = true;
+                    renderDashboard(data);
+                }
+
+            } catch (error) {
+                console.error("Error updating dashboard:", error);
+            }
+        }
+
+        function renderKpiCards(stats) {
+            ui.kpiScansStarted.textContent = stats.totalScansStarted || 0;
+            ui.kpiItemsMatched.textContent = stats.totalItemsMatched || 0;
+            ui.kpiSummariesGenerated.textContent = stats.totalSummariesGenerated || 0;
+        }
+        
+        function renderHourlyChart(hourlyData) {
+            const chartContainer = document.getElementById('hourly-activity-chart-container');
+            if (dashboardCharts.hourly) dashboardCharts.hourly.destroy();
+            chartContainer.innerHTML = ''; 
+
+            const canvas = document.createElement('canvas');
+            chartContainer.appendChild(canvas);
+
+            const labels = Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0') + ":00");
+            const data = labels.map((_, i) => (hourlyData || {})[i.toString()] || 0);
+
+            dashboardCharts.hourly = new Chart(canvas, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Matches per Hour',
+                        data: data,
+                        backgroundColor: 'rgba(0, 237, 100, 0.5)',
+                        borderColor: 'rgba(0, 237, 100, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true, ticks: { color: '#9ca3af' }, grid: { color: '#4A5568' } },
+                        x: { ticks: { color: '#9ca3af' }, grid: { color: 'transparent' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+        
+        function renderLabelChart(labelData) {
+            const chartContainer = document.getElementById('matches-by-label-chart-container');
+            if (dashboardCharts.labels) dashboardCharts.labels.destroy();
+            chartContainer.innerHTML = '';
+
+            if (!labelData || Object.keys(labelData).length === 0) {
+                chartContainer.innerHTML = '<p class="text-gray-500 text-center self-center">No data for this day.</p>';
+                return;
+            }
+
+            const canvas = document.createElement('canvas');
+            chartContainer.appendChild(canvas);
+            
+            const labels = Object.keys(labelData).map(l => l.replace(/_/g, '.'));
+            const data = Object.values(labelData);
+            const colors = ['#00ED64', '#3b82f6', '#f59e0b', '#ef4444', '#818cf8', '#ec4899', '#14b8a6'];
+
+            dashboardCharts.labels = new Chart(canvas, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: data,
+                        backgroundColor: colors,
+                        borderColor: '#212934',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { position: 'bottom', labels: { color: '#9ca3af' } } }
+                }
+            });
+        }
+
+        function renderInteractiveTable(tableId, searchInputId, data, columns) {
+            const table = document.getElementById(tableId);
+            const searchInput = document.getElementById(searchInputId);
+            if (!table) return;
+
+            const render = () => {
+                const searchTerm = searchInput.value.toLowerCase();
+                let filteredData = [...data];
+
+                if (searchTerm) {
+                    filteredData = filteredData.filter(row => 
+                        columns.some(col => String(row[col.key]).toLowerCase().includes(searchTerm))
+                    );
+                }
+                
+                const sort = tableSortState[tableId] || {};
+                if (sort.key) {
+                    filteredData.sort((a, b) => {
+                        const valA = a[sort.key];
+                        const valB = b[sort.key];
+                        const order = sort.dir === 'asc' ? 1 : -1;
+                        if (typeof valA === 'number' && typeof valB === 'number') return (valA - valB) * order;
+                        return String(valA).localeCompare(String(valB)) * order;
+                    });
+                }
+
+                table.innerHTML = `<thead><tr>${columns.map(c => {
+                    const sortIcon = sort.key === c.key 
+                        ? (sort.dir === 'asc' ? '<i class="fa-solid fa-sort-up ml-2"></i>' : '<i class="fa-solid fa-sort-down ml-2"></i>')
+                        : '<i class="fa-solid fa-sort text-gray-600 ml-2"></i>';
+                    return `<th class="sortable" data-key="${c.key}">${c.title} ${sortIcon}</th>`;
+                }).join('')}</tr></thead>`;
+
+                const tbody = document.createElement('tbody');
+                if (filteredData.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="${columns.length}" class="text-center text-gray-500 py-4">No matching data</td></tr>`;
+                } else {
+                    filteredData.forEach(row => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = columns.map(col => `<td>${row[col.key]}</td>`).join('');
+                        tbody.appendChild(tr);
+                    });
+                }
+                table.appendChild(tbody);
+            };
+
+            table.addEventListener('click', e => {
+                const header = e.target.closest('th.sortable');
+                if (header) {
+                    const key = header.dataset.key;
+                    const currentSort = tableSortState[tableId] || {};
+                    const dir = (currentSort.key === key && currentSort.dir === 'asc') ? 'desc' : 'asc';
+                    tableSortState[tableId] = { key, dir };
+                    render();
+                }
+            });
+
+            searchInput.addEventListener('keyup', debounce(render, 200));
+            render();
+        }
+
+        // --- Stream Connection ---
         function connectToStream() {
             if (eventSource) return;
             eventSource = new EventSource('/stream');
             let cardAnimationDelay = 0;
             eventSource.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+                
+                // --- Dashboard real-time update hook ---
+                const isDashboardActive = !ui.dashboardView.classList.contains('hidden');
+                const today = new Date().toISOString().split('T')[0];
+                const shouldRefreshDashboard = isDashboardActive && currentAnalyticsDate === today;
+                
+                if (isMongoDbEnabled && shouldRefreshDashboard && (data.type === 'api_item' || data.type === 'summary_update' || (data.type === 'status' && data.status === 'scanning'))) {
+                    fetchAndRenderDashboard(currentAnalyticsDate);
+                }
+
+                // --- Main event handler ---
                 switch(data.type) {
+                    case 'local_analytics_update':
+                        handleLocalAnalyticsUpdate(data);
+                        break;
                     case 'status':
+                        if (clientSideStop && data.status !== 'idle' && data.status !== 'error') return; 
+                        if (data.status === 'idle' || data.status === 'error') clientSideStop = false;
+                        
                         handleStatusUpdate(data);
                         if (data.status !== 'scanning') cardAnimationDelay = 0;
                         break;
@@ -1972,7 +2563,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                         if (!document.querySelector(`[data-item-id="${data.id}"]`)) {
                             const card = createFeedCard(data, cardAnimationDelay);
                             ui.feedContainer.insertBefore(card, ui.controlsContainer.nextSibling);
-                            cardAnimationDelay += 100; // Stagger animation
+                            cardAnimationDelay += 100;
                         }
                         break;
                     case 'summary_update':
@@ -1996,10 +2587,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             };
         }
         async function startScan(sourceName, startPage = 1) {
-            if (startPage === 1) {
-                // document.querySelectorAll('.feed-card').forEach(card => card.remove());
-                // ui.placeholder.classList.remove('hidden');
-            }
+            clientSideStop = false; // Reset stop flag before starting a new scan
             await fetch('/scan-source', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2015,6 +2603,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         async function initialize() {
             setupConfigControls();
             setupManagementEventListeners();
+            initDashboard();
             await Promise.all([
                 fetchPatterns(), 
                 fetchSources(),

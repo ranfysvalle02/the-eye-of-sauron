@@ -765,9 +765,14 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 <button id="save-webhook-btn"
                     class="px-3 py-2 text-sm font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Save</button>
             </div>
-            <div id="status-indicator" class="flex items-center space-x-2">
-                <span id="status-text" class="text-sm text-gray-400">Idle</span>
-                <div id="status-dot" class="w-3 h-3 bg-gray-500 rounded-full transition-colors"></div>
+            <div class="flex items-center space-x-4">
+                <button id="global-stop-btn" class="hidden px-4 py-2 text-sm font-semibold rounded-md bg-red-700 hover:bg-red-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5 text-white">
+                    <i class="fa-solid fa-stop mr-2"></i>Stop Scan
+                </button>
+                <div id="status-indicator" class="flex items-center space-x-2">
+                    <span id="status-text" class="text-sm text-gray-400">Idle</span>
+                    <div id="status-dot" class="w-3 h-3 bg-gray-500 rounded-full transition-colors"></div>
+                </div>
             </div>
         </div>
     </header>
@@ -805,7 +810,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                         <i class="fa-solid fa-chevron-right"></i>
                     </button>
                     <div id="sidebar-source-templates-container" class="quick-add-container mt-2 space-y-3">
-                        </div>
+                    </div>
                 </div>
 
             </div>
@@ -995,6 +1000,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             mappingInputsContainer: document.getElementById('mapping-inputs-container'),
             quickAddToggle: document.getElementById('quick-add-toggle'),
             sidebarSourceTemplatesContainer: document.getElementById('sidebar-source-templates-container'),
+            globalStopBtn: document.getElementById('global-stop-btn'),
         };
         let currentPatterns = [];
         let apiSources = [];
@@ -1089,9 +1095,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                         <button title="Resume Scan" class="resume-btn p-2 text-green-400 hover:text-green-300 transition-transform transform hover:scale-125" data-name="${sourceName}">
                             <i class="fa-solid fa-play fa-lg"></i>
                         </button>
-                        <button title="Stop Scan" class="stop-btn p-2 text-red-500 hover:text-red-400 transition-transform transform hover:scale-125" data-name="${sourceName}">
-                            <i class="fa-solid fa-stop fa-lg"></i>
-                        </button>
                     `;
                 }
                 if (currentStatus === 'scanning') {
@@ -1099,9 +1102,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                         <i class="fa-solid fa-spinner fa-spin text-blue-400 mx-2 text-lg"></i>
                         <button title="Pause Scan" class="pause-btn p-2 text-yellow-400 hover:text-yellow-300 transition-transform transform hover:scale-125" data-name="${sourceName}">
                             <i class="fa-solid fa-pause fa-lg"></i>
-                        </button>
-                        <button title="Stop Scan" class="stop-btn p-2 text-red-500 hover:text-red-400 transition-transform transform hover:scale-125" data-name="${sourceName}">
-                            <i class="fa-solid fa-stop fa-lg"></i>
                         </button>
                     `;
                 }
@@ -1278,6 +1278,9 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             ui.sourceModal.addEventListener('click', (e) => { if (e.target === ui.sourceModal) closeModal('source'); });
             ui.listenerForm.addEventListener('submit', handleSave);
             ui.saveSourceBtn.addEventListener('click', () => handleSave({ target: ui.sourceForm }));
+            
+            ui.globalStopBtn.addEventListener('click', handleStopScan);
+
             document.body.addEventListener('click', e => {
                 const btn = e.target.closest('.edit-btn, .remove-btn');
                 if (btn) {
@@ -1296,11 +1299,13 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 const scanBtn = e.target.closest('.scan-btn');
                 const pauseBtn = e.target.closest('.pause-btn');
                 const resumeBtn = e.target.closest('.resume-btn');
-                const stopBtn = e.target.closest('.stop-btn');
+                // The main stop button is now global, but we can keep this for redundancy if wanted.
+                // For now, removing the per-item stop button to avoid confusion.
+                // const stopBtn = e.target.closest('.stop-btn');
                 if (scanBtn) startScan(scanBtn.dataset.name, 1);
                 if (pauseBtn) handlePauseScan();
                 if (resumeBtn) handleResumeScan();
-                if (stopBtn) handleStopScan();
+                // if (stopBtn) handleStopScan();
             });
             ui.scanAllSourcesBtn.addEventListener('click', scanAllSources);
             ui.feedContainer.addEventListener('click', handleFeedActions);
@@ -1536,6 +1541,14 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             if (['idle', 'error'].includes(data.status)) {
                 activeScan.sourceName = null;
             }
+
+            const isScanInProgress = ['scanning', 'scan_paused', 'manually_paused'].includes(data.status);
+            if (isScanInProgress) {
+                ui.globalStopBtn.classList.remove('hidden');
+            } else {
+                ui.globalStopBtn.classList.add('hidden');
+            }
+
             renderSources();
             updateControlsUI(data);
             if (data.status === 'manually_paused') {
@@ -1561,17 +1574,18 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                             <div class="sauron-eye"></div>
                             <div class="scan-beam"></div>
                         </div>
-                        <p class="text-sm text-gray-400 mt-4">${data.reason || 'Scanning...'}</p>`;
+                        <p class="text-sm text-gray-400 mt-4">${data.reason || 'Scanning...'}</p>
+                        <button id="main-feed-stop-btn" class="mt-4 px-5 py-2 font-semibold rounded-md bg-red-700 hover:bg-red-600 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"><i class="fa-solid fa-stop mr-2"></i>Stop</button>
+                    `;
+                    document.getElementById('main-feed-stop-btn').addEventListener('click', handleStopScan);
                     break;
                 case 'scan_paused':
                     controls.innerHTML = `
                         <p class="text-lg font-semibold text-yellow-400 mb-3">${data.reason}</p>
                         <div class="flex items-center gap-4">
                             <button id="continue-scan-btn" class="px-6 py-2 font-semibold rounded-md bg-blue-700 hover:bg-blue-600 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"><i class="fa-solid fa-forward mr-2"></i>Continue Scan</button>
-                            <button id="stop-btn" class="px-5 py-2 font-semibold rounded-md bg-red-700 hover:bg-red-600 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"><i class="fa-solid fa-stop mr-2"></i>Stop</button>
                         </div>`;
                     document.getElementById('continue-scan-btn').addEventListener('click', () => startScan(activeScan.sourceName, activeScan.nextPage));
-                    document.getElementById('stop-btn').addEventListener('click', handleStopScan);
                     break;
                 case 'rate_limit_paused':
                     controls.innerHTML = `

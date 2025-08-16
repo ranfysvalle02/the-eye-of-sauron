@@ -28,7 +28,7 @@ So, if you’re ready to stop playing catch-up and start getting ahead, it might
 
 ***
 
-### ## Appendix: Streamlining Advanced Search with a Unified Platform
+## Appendix: Streamlining Advanced Search with a Unified Platform
 
 Implementing sophisticated search capabilities, such as hybrid search, has traditionally been a complex engineering challenge. Teams often had to stitch together multiple specialized systems—one for keyword-based text search and another for semantic vector search. This approach introduces significant overhead, requiring developers to write, manage, and maintain complex application-layer code just to synchronize data and merge results from these disparate sources.
 

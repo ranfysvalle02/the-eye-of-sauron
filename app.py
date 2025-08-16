@@ -67,6 +67,47 @@ DEFAULT_API_SOURCES = json.dumps([
 API_SOURCES = {}
 sources_lock = threading.Lock()
 
+# --- API Source Template Configuration ---
+API_SOURCE_TEMPLATES = [
+    {
+        "id": "hn-search",
+        "name": "Hacker News Search",
+        "description": "Searches for stories on Hacker News by date.",
+        "variables": [
+            {"name": "Query", "key": "{QUERY}", "placeholder": "e.g., ai"}
+        ],
+        "config": {
+            "name": "Hacker News '{QUERY}' Stories",
+            "apiUrl": "http://hn.algolia.com/api/v1/search_by_date?query={QUERY}&tags=story&page={PAGE}",
+            "dataRoot": "hits",
+            "fieldMappings": {
+                "id": "objectID", "title": "title", "url": "url",
+                "text": "story_text", "by": "author", "time": "created_at"
+            },
+            "fieldsToCheck": ["title", "story_text"]
+        }
+    },
+    {
+        "id": "github-issues",
+        "name": "GitHub Repo Issues",
+        "description": "Fetches all issues from a specific GitHub repository.",
+        "variables": [
+            {"name": "Owner", "key": "{OWNER}", "placeholder": "e.g., langchain-ai"},
+            {"name": "Repo", "key": "{REPO}", "placeholder": "e.g., langchain"}
+        ],
+        "config": {
+            "name": "GitHub Issues for {OWNER}/{REPO}",
+            "apiUrl": "https://api.github.com/repos/{OWNER}/{REPO}/issues?state=all&per_page=100&page={PAGE}",
+            "dataRoot": "",
+            "fieldMappings": {
+                "id": "id", "title": "title", "url": "html_url",
+                "text": "body", "by": "user.login", "time": "created_at"
+            },
+            "fieldsToCheck": ["title", "body"]
+        }
+    }
+]
+
 # --- Service Configuration ---
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 25))
 PAGES_PER_SCAN = 10  # Scan this many pages before pausing for user input
@@ -355,6 +396,18 @@ def manage_patterns():
         update_search_patterns(new_patterns_list)
         return jsonify({"status": "success"})
 
+@app.route('/validate-regex', methods=['POST'])
+def validate_regex():
+    data = request.get_json()
+    pattern = data.get('pattern')
+    if pattern is None:
+        return jsonify({"valid": False, "error": "No pattern provided."}), 400
+    try:
+        re.compile(pattern)
+        return jsonify({"valid": True})
+    except re.error as e:
+        return jsonify({"valid": False, "error": str(e)})
+
 def update_api_sources(sources_list):
     global API_SOURCES
     new_sources = {}
@@ -376,6 +429,10 @@ def manage_api_sources():
             return jsonify({"error": "Invalid data format"}), 400
         update_api_sources(new_sources_list)
         return jsonify({"status": "success"})
+
+@app.route('/api-source-templates')
+def get_api_source_templates():
+    return jsonify(API_SOURCE_TEMPLATES)
 
 @app.route('/scan-source', methods=['POST'])
 def scan_source():
@@ -507,6 +564,39 @@ def send_to_slack():
         logging.error(f"An unexpected error occurred in send_to_slack: {e}")
         return jsonify({"error": "An unexpected server error occurred."}), 500
 
+@app.route('/preview-api-source', methods=['POST'])
+def preview_api_source():
+    data = request.get_json()
+    api_url_template = data.get('apiUrl')
+    if not api_url_template:
+        return jsonify({"error": "Missing 'apiUrl'"}), 400
+
+    # Replace {PAGE} with a static '1' for the preview, as this is standard
+    api_url = api_url_template.replace("{PAGE}", "1")
+    
+    logging.info(f"Fetching preview from: {api_url}")
+
+    try:
+        request_headers = HEADERS.copy()
+        if GITHUB_PAT and "api.github.com" in api_url:
+            request_headers["Authorization"] = f"Bearer {GITHUB_PAT}"
+        
+        response = requests.get(api_url, headers=request_headers, timeout=15)
+        response.raise_for_status()
+        
+        try:
+            preview_data = response.json()
+            return jsonify(preview_data)
+        except json.JSONDecodeError:
+            return jsonify({"error": "Response was not valid JSON.", "raw_response": response.text})
+
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Request timed out after 15 seconds."}), 504
+    except requests.exceptions.HTTPError as e:
+        error_body = e.response.text
+        return jsonify({"error": f"HTTP Error: {e.response.status_code} {e.response.reason}", "raw_response": error_body}), e.response.status_code
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Failed to fetch data: {str(e)}"}), 500
 
 # --- HTML Template ---
 HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
@@ -523,6 +613,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             --brand-blue: #3b82f6;
             --brand-yellow: #f59e0b;
             --brand-red: #ef4444;
+            --brand-indigo: #818cf8;
             --bg-dark-primary: #121921;
             --bg-dark-secondary: #212934;
             --border-color: #4A5568;
@@ -548,7 +639,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         .modal-content { transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
         .sidebar-section { border-top: 1px solid var(--border-color); padding-top: 1rem; margin-top: 1rem; }
         .code-input { font-family: 'Courier New', Courier, monospace; font-size: 0.875rem; }
-        /* Eye Animation */
         .sauron-eye-container { position: relative; width: 150px; height: 150px; }
         .sauron-eye {
             position: absolute;
@@ -578,7 +668,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             transform-origin: center;
             animation: sweep 3s linear infinite;
         }
-        /* Animations */
         @keyframes pulse-eye {
             0%, 100% { transform: scale(1); box-shadow: 0 0 10px #ff8c00; }
             50% { transform: scale(1.05); box-shadow: 0 0 25px #ff4500, 0 0 40px #ff8c00; }
@@ -602,6 +691,64 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         @keyframes pulse-border {
             0%, 100% { border-color: var(--brand-green); }
             50% { border-color: #4A5568; }
+        }
+        /* New styles for API Previewer */
+        .preview-tab-btn {
+            padding: 0.5rem 1rem; border-radius: 6px; background-color: var(--bg-dark-secondary);
+            border: 1px solid var(--border-color); transition: all 0.2s;
+        }
+        .preview-tab-btn.active-tab {
+            background-color: var(--brand-blue); border-color: var(--brand-blue); color: white; font-weight: 600;
+        }
+        .json-key { color: #9cdcfe; }
+        .json-string { color: #ce9178; }
+        .json-number { color: #b5cea8; }
+        .json-boolean { color: #569cd6; }
+        .json-null { color: #569cd6; }
+        .json-value { cursor: pointer; border-radius: 3px; padding: 1px 3px; display: inline-block; }
+        .json-value:hover { background-color: rgba(59, 130, 246, 0.3); }
+        .selected-json-path { background-color: rgba(59, 130, 246, 0.5); box-shadow: 0 0 5px var(--brand-blue); }
+        .regex-match {
+            background-color: rgba(245, 158, 11, 0.4); /* yellow-500 with opacity */
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        body.path-selected .mapping-target-btn {
+            animation: pulse-blue 1.5s infinite;
+        }
+        @keyframes pulse-blue {
+            0%, 100% { background-color: #374151; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+            50% { background-color: var(--brand-blue); color: white; box-shadow: 0 0 10px 5px rgba(59, 130, 246, 0.4); }
+        }
+        /* Styles for new checkboxes in previewer */
+        .json-entry-label { display: flex; align-items: center; cursor: pointer; width: 100%; border-radius: 3px; padding: 2px 0; }
+        .json-entry-label:hover { background-color: rgba(255, 255, 255, 0.05); }
+        .json-checkbox { margin-right: 0.75rem; accent-color: var(--brand-green); width: 14px; height: 14px; }
+        
+        /* New styles for Quick Add accordion */
+        #quick-add-toggle .fa-chevron-right { transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        #quick-add-toggle.active .fa-chevron-right { transform: rotate(90deg); }
+        .quick-add-container {
+            max-height: 0;
+            opacity: 0;
+            transition: max-height 0.5s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease-out, margin-top 0.5s ease;
+            margin-top: 0 !important;
+        }
+        .quick-add-container.active {
+            max-height: 500px; /* Adjust as needed for content */
+            opacity: 1;
+            margin-top: 0.75rem !important;
+        }
+        .quick-add-item {
+            opacity: 0;
+            transform: translateY(-10px);
+            animation: fade-in-slide-up 0.4s forwards;
+        }
+        @keyframes fade-in-slide-up {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
     </style>
 </head>
@@ -651,6 +798,16 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                     </button>
                 </div>
                 <div id="sources-list" class="mt-2 flex-1 space-y-2 overflow-y-auto pr-2"></div>
+                
+                <div class="mt-4 border-t brand-border pt-4">
+                    <button id="quick-add-toggle" class="w-full flex justify-between items-center text-left text-base font-semibold text-indigo-300 hover:text-indigo-200 transition-colors">
+                        <span><i class="fa-solid fa-wand-magic-sparkles mr-2"></i> Quick Add from Template</span>
+                        <i class="fa-solid fa-chevron-right"></i>
+                    </button>
+                    <div id="sidebar-source-templates-container" class="quick-add-container mt-2 space-y-3">
+                        </div>
+                </div>
+
             </div>
         </aside>
         <div id="feed-container" class="flex-1 h-full overflow-y-auto p-4 md:p-6 lg:p-8 space-y-6">
@@ -666,7 +823,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
     </main>
     <div id="listener-modal"
         class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
-        <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-md mx-4 modal-content transform scale-95">
+        <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-lg mx-4 modal-content transform scale-95">
             <form id="listener-form">
                 <h3 id="listener-modal-title" class="text-xl font-bold mb-4">Add New Listener</h3>
                 <input type="hidden" id="original-listener-label">
@@ -675,55 +832,111 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                         <label for="listener-label" class="block text-sm font-medium">Label</label>
                         <input type="text" id="listener-label" placeholder="e.g., Bug Reports" required
                             class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500">
+                        <p id="listener-label-error" class="text-red-500 text-xs mt-1 h-4"></p>
                     </div>
                     <div>
                         <label for="listener-pattern" class="block text-sm font-medium">Regex Pattern</label>
-                        <input type="text" id="listener-pattern" placeholder="e.g., (?i)bug" required
-                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500">
+                        <div class="relative">
+                            <input type="text" id="listener-pattern" placeholder="e.g., (?i)bug" required
+                                class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500 font-mono text-sm pr-8">
+                            <div id="regex-validity-indicator" class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+                            </div>
+                        </div>
+                        <p id="listener-pattern-error" class="text-red-500 text-xs mt-1 h-4"></p>
+                    </div>
+                </div>
+                <div class="mt-6 border-t border-gray-700 pt-4">
+                    <h4 class="text-base font-semibold mb-2 flex items-center">
+                        <i class="fa-solid fa-vial mr-2 text-blue-400"></i>Regex Tester
+                    </h4>
+                    <div>
+                        <label for="regex-test-string" class="block text-sm font-medium text-gray-400">Test String</label>
+                        <textarea id="regex-test-string" rows="3" placeholder="Enter some text here to test your pattern..."
+                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"></textarea>
+                    </div>
+                    <div class="mt-2">
+                        <label class="block text-sm font-medium text-gray-400">Result</label>
+                        <div id="regex-test-result" class="mt-1 w-full p-2 rounded-md bg-gray-900 border brand-border min-h-[4rem] text-sm whitespace-pre-wrap break-words">
+                            <span class="text-gray-500">No matches found.</span>
+                        </div>
                     </div>
                 </div>
                 <div class="flex justify-end space-x-3 mt-6">
                     <button type="button" id="cancel-listener-btn" class="px-4 py-2 font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Cancel</button>
-                    <button type="submit" class="px-4 py-2 font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Save Listener</button>
+                    <button type="submit" id="save-listener-btn" class="px-4 py-2 font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>Save Listener</button>
                 </div>
             </form>
         </div>
     </div>
     <div id="source-modal"
         class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
-        <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col modal-content transform scale-95">
+        <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-3xl mx-4 max-h-[90vh] flex flex-col modal-content transform scale-95">
             <h3 id="source-modal-title" class="text-xl font-bold mb-4">Add New API Source</h3>
             <form id="source-form" class="flex-1 overflow-y-auto pr-4 space-y-4">
                 <input type="hidden" id="original-source-name">
-                <div>
-                    <label for="source-name" class="block text-sm font-medium">Source Name (Unique)</label>
-                    <input type="text" id="source-name" placeholder="e.g., Hacker News 'AI' Stories" required
-                        class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="source-name" class="block text-sm font-medium">Source Name (Unique)</label>
+                        <input type="text" id="source-name" placeholder="e.g., Hacker News 'AI' Stories" required
+                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label for="source-api-url" class="block text-sm font-medium">API URL</label>
+                        <div class="flex items-center gap-2 mt-1">
+                            <input type="text" id="source-api-url" placeholder="https://api.example.com/data?page={PAGE}" required
+                                class="flex-grow w-full p-2 rounded-md bg-gray-800 border brand-border font-mono text-sm">
+                            <button type="button" id="fetch-preview-btn" class="px-3 py-2 text-sm font-semibold rounded-md bg-indigo-700 hover:bg-indigo-600 transition-all shadow text-white whitespace-nowrap">
+                                <i class="fa-solid fa-wand-magic-sparkles mr-1"></i> Preview
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div id="source-preview-container" class="mt-4 border-t brand-border pt-4 hidden">
+                    <h4 class="text-md font-semibold mb-2 flex justify-between items-center">
+                        <span>API Response Preview</span>
+                        <span id="selected-path-display" class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded"></span>
+                    </h4>
+                    <div id="preview-status" class="p-3 rounded-md bg-gray-800/50 text-center text-gray-400">
+                        Click "Preview" to load sample data from your API.
+                    </div>
+                    <div id="preview-content" class="hidden">
+                        <div class="flex gap-2 mb-2">
+                            <button type="button" class="preview-tab-btn active-tab" data-tab="interactive">Interactive Mapper</button>
+                            <button type="button" class="preview-tab-btn" data-tab="raw">Raw JSON</button>
+                        </div>
+                        <div id="preview-interactive-tab" class="preview-tab-content">
+                            <p class="text-xs text-gray-400 mb-2">
+                                For <b>Field Mappings</b>, click a value, then a target button <i class="fa-solid fa-crosshairs text-blue-400"></i>. For <b>Fields to Check</b>, simply toggle the checkbox next to a key.
+                            </p>
+                            <div id="interactive-preview-item" class="p-3 rounded-md bg-gray-900/70 border brand-border max-h-64 overflow-y-auto text-sm font-mono"></div>
+                        </div>
+                        <div id="preview-raw-tab" class="preview-tab-content hidden">
+                            <pre class="w-full max-h-64 overflow-auto rounded-md bg-gray-900/70 border brand-border p-3"><code id="raw-json-preview" class="text-xs"></code></pre>
+                        </div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="source-data-root" class="block text-sm font-medium">Data Root Path (optional)</label>
+                        <input type="text" id="source-data-root" placeholder="e.g., results.data"
+                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border font-mono text-sm">
+                        <p class="text-xs text-gray-400 mt-1">Path to the array of items. Leave blank if the response is the array.</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Fields to Check for Keywords</label>
+                        <div id="fields-to-check-container" class="mt-1 w-full p-2 min-h-[60px] rounded-md bg-gray-800 border brand-border flex flex-wrap gap-2 items-start">
+                            </div>
+                        <textarea id="source-fields-to-check" class="hidden"></textarea>
+                    </div>
                 </div>
                 <div>
-                    <label for="source-api-url" class="block text-sm font-medium">API URL</label>
-                    <input type="text" id="source-api-url" placeholder="https://api.example.com/data?page={PAGE}"
-                        required
-                        class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border font-mono text-sm">
-                    <p class="text-xs text-gray-400 mt-1">Use <code class="bg-gray-700 px-1 rounded">{PAGE}</code> for page number pagination.</p>
-                </div>
-                <div>
-                    <label for="source-data-root" class="block text-sm font-medium">Data Root Path (optional)</label>
-                    <input type="text" id="source-data-root" placeholder="e.g., results.data"
-                        class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border font-mono text-sm">
-                    <p class="text-xs text-gray-400 mt-1">Path to the array of items in the JSON response. Use dot notation. Leave blank if the response is the array itself.</p>
-                </div>
-                <div>
-                    <label for="source-fields-to-check" class="block text-sm font-medium">Fields to Check for Keywords</label>
-                    <textarea id="source-fields-to-check" rows="2" placeholder="title&#10;body.content" required
-                        class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border code-input"></textarea>
-                    <p class="text-xs text-gray-400 mt-1">One field per line. These fields will be combined and checked against listener patterns. Use dot notation for nested fields.</p>
-                </div>
-                <div>
-                    <label for="source-field-mappings" class="block text-sm font-medium">Field Mappings (JSON)</label>
-                    <textarea id="source-field-mappings" rows="8" required
-                        class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border code-input"></textarea>
-                    <p class="text-xs text-gray-400 mt-1">Map API fields to standard fields. Required keys: <code class="bg-gray-700 px-1 rounded">id</code>, <code class="bg-gray-700 px-1 rounded">title</code>, <code class="bg-gray-700 px-1 rounded">url</code>, <code class="bg-gray-700 px-1 rounded">text</code>, <code class="bg-gray-700 px-1 rounded">by</code>, <code class="bg-gray-700 px-1 rounded">time</code>.</p>
+                    <label class="block text-sm font-medium">Field Mappings</label>
+                        <p class="text-xs text-gray-400 mb-2">
+                            Use the <span class="font-bold text-indigo-400">Previewer</span> above. Click a value, then click the <i class="fa-solid fa-crosshairs text-blue-400"></i> icon for the field you want to map.
+                        </p>
+                    <div id="mapping-inputs-container" class="space-y-2">
+                    </div>
+                    <textarea id="source-field-mappings" class="hidden"></textarea>
                 </div>
             </form>
             <div class="flex justify-end space-x-3 mt-6 pt-4 border-t brand-border">
@@ -751,6 +964,12 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             originalListenerLabelInput: document.getElementById('original-listener-label'),
             showAddListenerModalBtn: document.getElementById('show-add-listener-modal-btn'),
             cancelListenerBtn: document.getElementById('cancel-listener-btn'),
+            saveListenerBtn: document.getElementById('save-listener-btn'),
+            listenerLabelError: document.getElementById('listener-label-error'),
+            listenerPatternError: document.getElementById('listener-pattern-error'),
+            regexValidityIndicator: document.getElementById('regex-validity-indicator'),
+            regexTestString: document.getElementById('regex-test-string'),
+            regexTestResult: document.getElementById('regex-test-result'),
             sourcesList: document.getElementById('sources-list'),
             sourceModal: document.getElementById('source-modal'),
             sourceForm: document.getElementById('source-form'),
@@ -760,18 +979,45 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             sourceApiUrlInput: document.getElementById('source-api-url'),
             sourceDataRootInput: document.getElementById('source-data-root'),
             sourceFieldsToCheckTextarea: document.getElementById('source-fields-to-check'),
+            fieldsToCheckContainer: document.getElementById('fields-to-check-container'),
             sourceFieldMappingsTextarea: document.getElementById('source-field-mappings'),
             showAddSourceModalBtn: document.getElementById('show-add-source-modal-btn'),
             cancelSourceBtn: document.getElementById('cancel-source-btn'),
             saveSourceBtn: document.getElementById('save-source-btn'),
-            // New "Scan All" button
             scanAllSourcesBtn: document.getElementById('scan-all-sources-btn'),
+            fetchPreviewBtn: document.getElementById('fetch-preview-btn'),
+            sourcePreviewContainer: document.getElementById('source-preview-container'),
+            previewStatus: document.getElementById('preview-status'),
+            previewContent: document.getElementById('preview-content'),
+            selectedPathDisplay: document.getElementById('selected-path-display'),
+            interactivePreviewItem: document.getElementById('interactive-preview-item'),
+            rawJsonPreview: document.getElementById('raw-json-preview'),
+            mappingInputsContainer: document.getElementById('mapping-inputs-container'),
+            quickAddToggle: document.getElementById('quick-add-toggle'),
+            sidebarSourceTemplatesContainer: document.getElementById('sidebar-source-templates-container'),
         };
         let currentPatterns = [];
         let apiSources = [];
+        let sourceTemplates = [];
         let eventSource = null;
         let activeScan = { sourceName: null, nextPage: 1 };
         let currentStatus = 'idle';
+        let selectedJsonPath = null;
+        let previewData = null;
+        let currentFieldsToCheck = [];
+        const requiredMappings = ["id", "title", "url", "text", "by", "time"];
+        let listenerFormValidity = { label: false, pattern: false };
+
+        const debounce = (func, delay) => {
+            let timeoutId;
+            return (...args) => {
+                clearTimeout(timeoutId);
+                timeoutId = setTimeout(() => {
+                    func.apply(this, args);
+                }, delay);
+            };
+        };
+
         function setupConfigControls() {
             ui.slackWebhookUrlInput.value = localStorage.getItem('slackWebhookUrl') || '';
             ui.saveWebhookBtn.addEventListener('click', () => {
@@ -830,6 +1076,9 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         const setSources = (data) => { apiSources = data; };
         const fetchSources = () => fetchData('/api-sources', setSources, renderSources);
         const updateSources = () => updateDataOnServer('/api-sources', apiSources);
+        const setSourceTemplates = (data) => { sourceTemplates = data; };
+        const fetchSourceTemplates = () => fetchData('/api-source-templates', setSourceTemplates, renderSourceTemplates);
+        
         function getSourceControlsHTML(source) {
             const sourceName = source.name;
             const isThisSourceActive = activeScan.sourceName === sourceName;
@@ -892,6 +1141,134 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 ui.sourcesList.appendChild(div);
             });
         }
+        function renderSourceTemplates() {
+            const container = ui.sidebarSourceTemplatesContainer;
+            container.innerHTML = '';
+            sourceTemplates.forEach((template, index) => {
+                const templateEl = document.createElement('div');
+                templateEl.className = 'quick-add-item p-3 bg-gray-900/50 border brand-border rounded-lg';
+                templateEl.style.animationDelay = `${index * 100}ms`;
+                
+                const variablesHTML = template.variables.map(v => `
+                    <div class="flex-1">
+                        <label class="block text-xs font-medium text-gray-400">${v.name}</label>
+                        <input type="text" data-key="${v.key}" placeholder="${v.placeholder}" 
+                            class="mt-1 w-full p-1.5 text-sm rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-1 focus:ring-indigo-500">
+                    </div>
+                `).join('');
+
+                templateEl.innerHTML = `
+                    <p class="font-semibold text-sm">${template.name}</p>
+                    <p class="text-xs text-gray-400 mb-2">${template.description}</p>
+                    <div class="flex items-end gap-2">
+                        ${variablesHTML}
+                        <button type="button" class="apply-template-btn h-[35px] px-3 py-1 text-sm font-semibold rounded-md bg-indigo-700 hover:bg-indigo-600 transition-all shadow text-white whitespace-nowrap" data-template-id="${template.id}">
+                            Apply
+                        </button>
+                    </div>
+                `;
+                container.appendChild(templateEl);
+            });
+        }
+
+        function testRegexLocally() {
+            const patternStr = ui.listenerPatternInput.value;
+            const testStr = ui.regexTestString.value;
+            const resultEl = ui.regexTestResult;
+
+            if (!patternStr || !testStr) {
+                resultEl.innerHTML = '<span class="text-gray-500">Enter a pattern and test string.</span>';
+                return;
+            }
+
+            try {
+                let cleanPattern = patternStr;
+                let flags = 'g';
+
+                if (patternStr.startsWith('(?i)')) {
+                    cleanPattern = patternStr.substring(4);
+                    flags += 'i';
+                }
+                
+                const regex = new RegExp(cleanPattern, flags);
+                const highlighted = testStr.replace(regex, (match) => `<span class="regex-match">${match}</span>`);
+                
+                if (highlighted !== testStr) {
+                    resultEl.innerHTML = highlighted;
+                } else {
+                    resultEl.innerHTML = '<span class="text-gray-500">No matches found.</span>';
+                }
+            } catch (e) {
+                resultEl.innerHTML = `<span class="text-yellow-500">Invalid JavaScript Regex: ${e.message}</span>`;
+            }
+        }
+
+        const validateRegexOnServer = debounce(async () => {
+            const pattern = ui.listenerPatternInput.value;
+            const errorEl = ui.listenerPatternError;
+            const indicatorEl = ui.regexValidityIndicator;
+
+            if (!pattern) {
+                errorEl.textContent = 'Pattern cannot be empty.';
+                indicatorEl.innerHTML = '<i class="fas fa-times-circle text-red-500"></i>';
+                listenerFormValidity.pattern = false;
+                updateSaveButtonState();
+                return;
+            }
+
+            try {
+                const response = await fetch('/validate-regex', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pattern })
+                });
+                const result = await response.json();
+                if (result.valid) {
+                    errorEl.textContent = '';
+                    indicatorEl.innerHTML = '<i class="fas fa-check-circle text-green-500"></i>';
+                    listenerFormValidity.pattern = true;
+                } else {
+                    errorEl.textContent = result.error;
+                    indicatorEl.innerHTML = '<i class="fas fa-times-circle text-red-500"></i>';
+                    listenerFormValidity.pattern = false;
+                }
+            } catch (e) {
+                errorEl.textContent = 'Could not reach validation server.';
+                indicatorEl.innerHTML = '<i class="fas fa-exclamation-triangle text-yellow-500"></i>';
+                listenerFormValidity.pattern = false;
+            }
+            updateSaveButtonState();
+        }, 300);
+
+        function validateLabel() {
+            const newLabel = ui.listenerLabelInput.value.trim();
+            const originalLabel = ui.originalListenerLabelInput.value;
+            const errorEl = ui.listenerLabelError;
+            
+            if (!newLabel) {
+                errorEl.textContent = 'Label cannot be empty.';
+                listenerFormValidity.label = false;
+                updateSaveButtonState();
+                return;
+            }
+
+            const isEditing = !!originalLabel;
+            const isDuplicate = currentPatterns.some(p => p.label === newLabel) && (!isEditing || newLabel !== originalLabel);
+
+            if (isDuplicate) {
+                errorEl.textContent = 'This label is already in use.';
+                listenerFormValidity.label = false;
+            } else {
+                errorEl.textContent = '';
+                listenerFormValidity.label = true;
+            }
+            updateSaveButtonState();
+        }
+
+        function updateSaveButtonState() {
+            ui.saveListenerBtn.disabled = !(listenerFormValidity.label && listenerFormValidity.pattern);
+        }
+        
         function setupManagementEventListeners() {
             ui.showAddListenerModalBtn.addEventListener('click', () => openModal('listener'));
             ui.showAddSourceModalBtn.addEventListener('click', () => openModal('source'));
@@ -901,15 +1278,20 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             ui.sourceModal.addEventListener('click', (e) => { if (e.target === ui.sourceModal) closeModal('source'); });
             ui.listenerForm.addEventListener('submit', handleSave);
             ui.saveSourceBtn.addEventListener('click', () => handleSave({ target: ui.sourceForm }));
-            // Handle dynamic edit/remove actions
             document.body.addEventListener('click', e => {
                 const btn = e.target.closest('.edit-btn, .remove-btn');
-                if (!btn) return;
-                const { type, ...data } = btn.dataset;
-                if (btn.classList.contains('edit-btn')) openModal(type, data);
-                else handleRemove(type, data);
+                if (btn) {
+                    const { type, ...data } = btn.dataset;
+                    if (btn.classList.contains('edit-btn')) openModal(type, data);
+                    else handleRemove(type, data);
+                    return;
+                }
+                const applyBtn = e.target.closest('.apply-template-btn');
+                if(applyBtn) {
+                    handleApplyTemplate(applyBtn);
+                    return;
+                }
             });
-            // Scan/Pause/Resume/Stop
             ui.sourcesList.addEventListener('click', (e) => {
                 const scanBtn = e.target.closest('.scan-btn');
                 const pauseBtn = e.target.closest('.pause-btn');
@@ -920,9 +1302,52 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 if (resumeBtn) handleResumeScan();
                 if (stopBtn) handleStopScan();
             });
-            // "Scan All" Sources
             ui.scanAllSourcesBtn.addEventListener('click', scanAllSources);
             ui.feedContainer.addEventListener('click', handleFeedActions);
+            ui.fetchPreviewBtn.addEventListener('click', handleFetchPreview);
+            ui.sourceModal.addEventListener('click', e => {
+                if(e.target.matches('.preview-tab-btn')) handleTabSwitch(e.target);
+                if(e.target.closest('.json-value')) handleJsonItemClick(e.target.closest('.json-value'));
+                if(e.target.closest('.mapping-target-btn')) handleMappingTargetClick(e.target.closest('.mapping-target-btn'));
+            });
+            ui.sourceDataRootInput.addEventListener('input', updateInteractivePreview);
+            ui.fieldsToCheckContainer.addEventListener('click', e => {
+                if (e.target.closest('.remove-field-btn')) {
+                    const field = e.target.closest('.remove-field-btn').dataset.field;
+                    currentFieldsToCheck = currentFieldsToCheck.filter(f => f !== field);
+                    renderFieldsToCheck();
+                    updateInteractivePreview(); // Sync checkboxes
+                }
+            });
+
+            // Event listener for checkboxes in the interactive preview
+            ui.interactivePreviewItem.addEventListener('change', e => {
+                if (e.target.matches('.json-checkbox')) {
+                    const path = e.target.dataset.path;
+                    if (e.target.checked) {
+                        if (!currentFieldsToCheck.includes(path)) {
+                            currentFieldsToCheck.push(path);
+                        }
+                    } else {
+                        currentFieldsToCheck = currentFieldsToCheck.filter(p => p !== path);
+                    }
+                    renderFieldsToCheck();
+                }
+            });
+
+            // Listener modal live validation
+            ui.listenerLabelInput.addEventListener('input', validateLabel);
+            ui.listenerPatternInput.addEventListener('input', () => {
+                validateRegexOnServer();
+                testRegexLocally();
+            });
+            ui.regexTestString.addEventListener('input', testRegexLocally);
+            
+            // Accordion for Quick Add
+            ui.quickAddToggle.addEventListener('click', () => {
+                ui.quickAddToggle.classList.toggle('active');
+                ui.sidebarSourceTemplatesContainer.classList.toggle('active');
+            });
         }
         function openModal(type, data = null) {
             const isEdit = data !== null;
@@ -932,27 +1357,40 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
             form.reset();
             ui[`${type}ModalTitle`].textContent = `${isEdit ? 'Edit' : 'Add New'} ${type === 'listener' ? 'Listener' : 'API Source'}`;
             if (type === 'listener') {
+                ui.listenerLabelError.textContent = '';
+                ui.listenerPatternError.textContent = '';
+                ui.regexValidityIndicator.innerHTML = '';
+                ui.regexTestString.value = '';
+                ui.regexTestResult.innerHTML = '<span class="text-gray-500">Enter a pattern and test string.</span>';
+                
                 ui.originalListenerLabelInput.value = isEdit ? data.label : '';
                 if (isEdit) {
                     const p = currentPatterns.find(p => p.label === data.label);
                     ui.listenerLabelInput.value = p.label;
                     ui.listenerPatternInput.value = p.pattern;
                 }
+                validateLabel();
+                validateRegexOnServer.flush ? validateRegexOnServer.flush() : validateRegexOnServer();
+                testRegexLocally();
             } else if (type === 'source') {
+                resetPreviewer();
+                renderMappingInputs();
                 ui.originalSourceNameInput.value = isEdit ? data.name : '';
                 if (isEdit) {
                     const s = apiSources.find(s => s.name === data.name);
                     ui.sourceNameInput.value = s.name;
                     ui.sourceApiUrlInput.value = s.apiUrl;
                     ui.sourceDataRootInput.value = s.dataRoot || '';
-                    ui.sourceFieldsToCheckTextarea.value = (s.fieldsToCheck || []).join('\\n');
+                    currentFieldsToCheck = s.fieldsToCheck || [];
                     ui.sourceFieldMappingsTextarea.value = JSON.stringify(s.fieldMappings || {}, null, 2);
                 } else {
-                    ui.sourceFieldMappingsTextarea.value = JSON.stringify({
-                        "id": "item_id", "title": "item_title", "url": "item_url",
-                        "text": "item_body", "by": "author.name", "time": "created_timestamp"
-                    }, null, 2);
+                    const defaultMappings = {};
+                    requiredMappings.forEach(k => defaultMappings[k] = "");
+                    ui.sourceFieldMappingsTextarea.value = JSON.stringify(defaultMappings, null, 2);
+                    currentFieldsToCheck = [];
                 }
+                renderFieldsToCheck();
+                populateMappingsFromTextarea();
             }
             modal.classList.remove('hidden');
             setTimeout(() => {
@@ -974,9 +1412,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 const newLabel = ui.listenerLabelInput.value.trim();
                 const originalLabel = ui.originalListenerLabelInput.value;
                 const isEditing = !!originalLabel;
-                if (currentPatterns.some(p => p.label === newLabel) && (!isEditing || newLabel !== originalLabel)) {
-                    return alert("A listener with that label already exists.");
-                }
+
                 const patternData = { label: newLabel, pattern: ui.listenerPatternInput.value.trim() };
                 if (isEditing) {
                     currentPatterns = currentPatterns.map(p => p.label === originalLabel ? patternData : p);
@@ -986,6 +1422,8 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 renderPatterns();
                 updatePatterns();
             } else if (type === 'source') {
+                syncMappingsToTextarea();
+                syncFieldsToCheckToTextarea();
                 const newName = ui.sourceNameInput.value.trim();
                 const originalName = ui.originalSourceNameInput.value;
                 const isEditing = !!originalName;
@@ -996,6 +1434,8 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                     const sourceData = {
                         name: newName,
                         apiUrl: ui.sourceApiUrlInput.value.trim(),
+                        httpMethod: "GET", // Assuming GET for now
+                        paginationStyle: "page_number", // Assuming page_number
                         dataRoot: ui.sourceDataRootInput.value.trim(),
                         fieldsToCheck: ui.sourceFieldsToCheckTextarea.value.split('\\n').map(f => f.trim()).filter(Boolean),
                         fieldMappings: JSON.parse(ui.sourceFieldMappingsTextarea.value)
@@ -1213,6 +1653,295 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 }, 3000);
             }
         }
+        
+        // --- API Previewer & Mapper Functions ---
+        async function handleApplyTemplate(button) {
+            const templateId = button.dataset.templateId;
+            const template = sourceTemplates.find(t => t.id === templateId);
+            if (!template) return;
+
+            const container = button.closest('.quick-add-item');
+            const replacements = {};
+            let allVarsFilled = true;
+            
+            template.variables.forEach(v => {
+                const input = container.querySelector(`input[data-key="${v.key}"]`);
+                if (input && input.value.trim()) {
+                    replacements[v.key] = input.value.trim();
+                } else {
+                    allVarsFilled = false;
+                }
+            });
+
+            if (!allVarsFilled) {
+                alert('Please fill in all template fields.');
+                return;
+            }
+
+            // Calculate final config
+            let finalApiUrl = template.config.apiUrl;
+            let finalName = template.config.name;
+            for (const [key, value] of Object.entries(replacements)) {
+                finalApiUrl = finalApiUrl.replace(new RegExp(key.replace(/\\{/g, '\\{').replace(/\\}/g, '\\}'), 'g'), value);
+                finalName = finalName.replace(new RegExp(key.replace(/\\{/g, '\\{').replace(/\\}/g, '\\}'), 'g'), value);
+            }
+
+            openModal('source');
+
+            // Populate the modal form with the template data
+            ui.sourceNameInput.value = finalName;
+            ui.sourceApiUrlInput.value = finalApiUrl;
+            ui.sourceDataRootInput.value = template.config.dataRoot || '';
+            currentFieldsToCheck = [...template.config.fieldsToCheck] || [];
+            renderFieldsToCheck();
+            ui.sourceFieldMappingsTextarea.value = JSON.stringify(template.config.fieldMappings || {}, null, 2);
+            populateMappingsFromTextarea();
+            
+            // Collapse the sidebar section
+            ui.quickAddToggle.classList.remove('active');
+            ui.sidebarSourceTemplatesContainer.classList.remove('active');
+
+            // Automatically trigger the preview after the modal animation
+            setTimeout(() => {
+                handleFetchPreview();
+            }, 350);
+        }
+
+        function resetPreviewer() {
+            previewData = null;
+            selectedJsonPath = null;
+            document.body.classList.remove('path-selected');
+            ui.sourcePreviewContainer.classList.add('hidden');
+            ui.previewContent.classList.add('hidden');
+            ui.previewStatus.classList.remove('hidden');
+            ui.previewStatus.innerHTML = 'Click "Preview" to load sample data from your API.';
+            ui.selectedPathDisplay.textContent = '';
+        }
+
+        async function handleFetchPreview() {
+            const apiUrl = ui.sourceApiUrlInput.value.trim();
+            if (!apiUrl) {
+                alert("Please enter an API URL first.");
+                return;
+            }
+            resetPreviewer();
+            ui.sourcePreviewContainer.classList.remove('hidden');
+            ui.previewStatus.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Fetching data...';
+            ui.fetchPreviewBtn.disabled = true;
+
+            try {
+                const response = await fetch('/preview-api-source', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ apiUrl })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Unknown error fetching preview.');
+                }
+                previewData = data;
+                ui.previewStatus.classList.add('hidden');
+                ui.previewContent.classList.remove('hidden');
+                ui.rawJsonPreview.textContent = JSON.stringify(previewData, null, 2);
+                updateInteractivePreview();
+            } catch (e) {
+                ui.previewStatus.innerHTML = `<span class="text-red-400"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Error: ${e.message}</span>`;
+            } finally {
+                ui.fetchPreviewBtn.disabled = false;
+            }
+        }
+
+        function getNestedValue(obj, path) {
+            if (!path) return obj;
+            return path.split('.').reduce((acc, part) => acc && acc[part], obj);
+        }
+
+        function updateInteractivePreview() {
+            if (!previewData) return;
+            const dataRoot = ui.sourceDataRootInput.value.trim();
+            const items = getNestedValue(previewData, dataRoot);
+            
+            if (Array.isArray(items) && items.length > 0) {
+                renderInteractiveJson(items[0], ui.interactivePreviewItem, dataRoot ? `${dataRoot}.0` : '0');
+                ui.sourceDataRootInput.classList.remove('border-red-500');
+                ui.sourceDataRootInput.classList.add('border-green-500');
+            } else {
+                ui.interactivePreviewItem.innerHTML = `<span class="text-yellow-400">Could not find an array of items at data root '${dataRoot}'. Displaying the full response.</span>`;
+                renderInteractiveJson(previewData, ui.interactivePreviewItem, '');
+                if (dataRoot) {
+                    ui.sourceDataRootInput.classList.add('border-red-500');
+                    ui.sourceDataRootInput.classList.remove('border-green-500');
+                }
+            }
+        }
+
+        function renderInteractiveJson(obj, container, pathPrefix = '') {
+            container.innerHTML = '';
+            
+            const getRelativePath = (fullPath) => {
+                const dataRoot = ui.sourceDataRootInput.value.trim();
+                let relativePath = fullPath;
+                if (dataRoot) {
+                    const prefix = dataRoot + '.0.';
+                    if (fullPath.startsWith(prefix)) {
+                        relativePath = fullPath.substring(prefix.length);
+                    }
+                } else if (fullPath.startsWith('0.')) {
+                        relativePath = fullPath.substring(2);
+                }
+                return relativePath;
+            };
+
+            const createNode = (key, value, path) => {
+                const isObject = typeof value === 'object' && value !== null;
+                const entry = document.createElement('div');
+                const pathParts = pathPrefix ? path.replace(pathPrefix, '').split('.') : path.split('.');
+                const paddingDepth = Math.max(0, pathParts.length - 1);
+                entry.style.paddingLeft = `${paddingDepth}rem`;
+                
+                const keySpan = `<span class="json-key">"${key}": </span>`;
+                
+                if (isObject) {
+                    entry.innerHTML = keySpan + (Array.isArray(value) ? '[' : '{');
+                    container.appendChild(entry);
+                    Object.entries(value).forEach(([k, v]) => createNode(k, v, path ? `${path}.${k}` : k));
+                    const closingEntry = document.createElement('div');
+                    closingEntry.style.paddingLeft = entry.style.paddingLeft;
+                    closingEntry.innerHTML = Array.isArray(value) ? ']' : '}';
+                    container.appendChild(closingEntry);
+                } else {
+                    const relativePath = getRelativePath(path);
+                    const isChecked = currentFieldsToCheck.includes(relativePath);
+                    const type = typeof value === 'string' ? 'string' : typeof value === 'number' ? 'number' : 'boolean';
+                    const displayValue = typeof value === 'string' ? `"${value}"` : value;
+                    entry.innerHTML = `
+                        <label class="json-entry-label">
+                            <input type="checkbox" class="json-checkbox" data-path="${relativePath}" ${isChecked ? 'checked' : ''}>
+                            ${keySpan}<span class="json-value json-${type}" data-path="${path}">${displayValue}</span>
+                        </label>
+                    `;
+                    container.appendChild(entry);
+                }
+            };
+            Object.entries(obj).forEach(([key, value]) => createNode(key, value, pathPrefix ? `${pathPrefix}.${key}` : key));
+        }
+
+        function handleTabSwitch(target) {
+            document.querySelectorAll('.preview-tab-btn').forEach(btn => btn.classList.remove('active-tab'));
+            target.classList.add('active-tab');
+            document.querySelectorAll('.preview-tab-content').forEach(content => content.classList.add('hidden'));
+            document.getElementById(`preview-${target.dataset.tab}-tab`).classList.remove('hidden');
+        }
+
+        function handleJsonItemClick(item) {
+            document.querySelectorAll('.selected-json-path').forEach(el => el.classList.remove('selected-json-path'));
+            item.classList.add('selected-json-path');
+            const fullPath = item.dataset.path;
+            const dataRoot = ui.sourceDataRootInput.value.trim();
+            let relativePath = fullPath;
+            if (dataRoot) {
+                const prefix = dataRoot + '.0.';
+                if (fullPath.startsWith(prefix)) {
+                    relativePath = fullPath.substring(prefix.length);
+                }
+            } else if (fullPath.startsWith('0.')) {
+                relativePath = fullPath.substring(2);
+            }
+            selectedJsonPath = relativePath;
+            ui.selectedPathDisplay.textContent = `Selected: ${selectedJsonPath}`;
+            document.body.classList.add('path-selected');
+        }
+
+        function renderMappingInputs() {
+            ui.mappingInputsContainer.innerHTML = '';
+            requiredMappings.forEach(key => {
+                const div = document.createElement('div');
+                div.className = 'flex items-center gap-2';
+                div.innerHTML = `
+                    <label class="w-16 text-sm text-gray-400 font-mono shrink-0">${key}:</label>
+                    <input type="text" readonly data-key="${key}" placeholder="<not mapped>" class="flex-grow p-2 rounded-md bg-gray-900 border brand-border focus:outline-none text-sm font-mono text-gray-300 transition-all duration-300">
+                    <button type="button" data-key="${key}" title="Map selected path to '${key}'" class="mapping-target-btn px-3 py-2 text-lg rounded-md bg-gray-700 hover:bg-blue-700 text-blue-400 hover:text-white transition-all">
+                        <i class="fa-solid fa-crosshairs pointer-events-none"></i>
+                    </button>
+                `;
+                ui.mappingInputsContainer.appendChild(div);
+            });
+        }
+        
+        function syncMappingsToTextarea() {
+            const mappings = {};
+            ui.mappingInputsContainer.querySelectorAll('input[data-key]').forEach(input => {
+                mappings[input.dataset.key] = input.value.trim();
+            });
+            ui.sourceFieldMappingsTextarea.value = JSON.stringify(mappings, null, 2);
+        }
+        
+        function populateMappingsFromTextarea() {
+            try {
+                const mappings = JSON.parse(ui.sourceFieldMappingsTextarea.value);
+                Object.entries(mappings).forEach(([key, value]) => {
+                    const input = ui.mappingInputsContainer.querySelector(`input[data-key="${key}"]`);
+                    if (input) {
+                        input.value = value;
+                    }
+                });
+            } catch (e) {
+                console.warn("Could not parse initial field mappings.", e);
+            }
+        }
+        
+        function handleMappingTargetClick(target) {
+            if (!selectedJsonPath) {
+                ui.selectedPathDisplay.textContent = 'Select a value from the preview first!';
+                setTimeout(() => { ui.selectedPathDisplay.textContent = selectedJsonPath || '' }, 2000);
+                return;
+            }
+            const key = target.dataset.key;
+            const input = ui.mappingInputsContainer.querySelector(`input[data-key="${key}"]`);
+            if (input) {
+                input.value = selectedJsonPath;
+                syncMappingsToTextarea();
+                
+                ui.selectedPathDisplay.textContent = `Mapped '${key}'!`;
+                document.querySelectorAll('.selected-json-path').forEach(el => el.classList.remove('selected-json-path'));
+                document.body.classList.remove('path-selected');
+                
+                input.classList.add('bg-green-900/50', 'border-green-500');
+                setTimeout(() => {
+                    input.classList.remove('bg-green-900/50', 'border-green-500');
+                    ui.selectedPathDisplay.textContent = '';
+                }, 1500);
+
+                selectedJsonPath = null;
+            }
+        }
+
+        function renderFieldsToCheck() {
+            ui.fieldsToCheckContainer.innerHTML = '';
+            if (currentFieldsToCheck.length === 0) {
+                ui.fieldsToCheckContainer.innerHTML = '<span class="text-xs text-gray-500 p-1">Use the previewer to select fields to check.</span>';
+            } else {
+                currentFieldsToCheck.forEach(field => {
+                    const pill = document.createElement('div');
+                    pill.className = 'flex items-center gap-2 bg-gray-900/70 border brand-border rounded-full px-3 py-1 text-sm font-mono';
+                    pill.innerHTML = `
+                        <span>${field}</span>
+                        <button type="button" class="remove-field-btn text-gray-500 hover:text-red-400" data-field="${field}" title="Remove field">
+                            <i class="fa-solid fa-times-circle"></i>
+                        </button>
+                    `;
+                    ui.fieldsToCheckContainer.appendChild(pill);
+                });
+            }
+            syncFieldsToCheckToTextarea();
+        }
+
+        function syncFieldsToCheckToTextarea() {
+            ui.sourceFieldsToCheckTextarea.value = currentFieldsToCheck.join('\\n');
+        }
+
+        // --- End of API Previewer Functions ---
+        
         function connectToStream() {
             if (eventSource) return;
             eventSource = new EventSource('/stream');
@@ -1254,7 +1983,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         }
         async function startScan(sourceName, startPage = 1) {
             if (startPage === 1) {
-                // Clear the feed for a fresh scan (optional)
                 // document.querySelectorAll('.feed-card').forEach(card => card.remove());
                 // ui.placeholder.classList.remove('hidden');
             }
@@ -1264,7 +1992,6 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
                 body: JSON.stringify({ source_name: sourceName, start_page: startPage })
             });
         }
-        // New function: scan all configured sources
         function scanAllSources() {
             if (!apiSources || apiSources.length === 0) {
                 return alert('No sources configured to scan.');
@@ -1274,7 +2001,11 @@ HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head>
         async function initialize() {
             setupConfigControls();
             setupManagementEventListeners();
-            await Promise.all([fetchPatterns(), fetchSources()]);
+            await Promise.all([
+                fetchPatterns(), 
+                fetchSources(),
+                fetchSourceTemplates()
+            ]);
             connectToStream();
             updateControlsUI();
         }

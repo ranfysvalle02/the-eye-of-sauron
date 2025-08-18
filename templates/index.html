@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The-Eye-Of-Sauron 👁️ | API Scanner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <link rel="stylesheet" type="text/css" href="https://npmcdn.com/flatpickr/dist/themes/dark.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="flex flex-col h-screen">
+    <header class="flex items-center justify-between p-4 border-b brand-border shadow-lg flex-wrap gap-4">
+        <div class="flex items-center space-x-3">
+            <h1 class="text-2xl font-bold text-white">The-Eye-Of-Sauron <span class="brand-green">👁️</span></h1>
+        </div>
+        <div class="flex items-center space-x-4 flex-wrap gap-4">
+            <div class="flex items-center space-x-2">
+                <input type="password" id="slack-webhook-url" placeholder="Slack Webhook URL"
+                    class="w-48 p-2 text-sm rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500 transition-all shadow-inner"
+                    title="Enter your Slack Webhook URL to enable sending notifications.">
+                <button id="save-webhook-btn"
+                    class="px-3 py-2 text-sm font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Save</button>
+            </div>
+            <div class="flex items-center space-x-4">
+                 <div id="config-status-container" class="relative hidden">
+                    <button id="config-status-btn" class="flex items-center space-x-2 text-sm text-gray-400 hover:text-white transition-colors">
+                        <i class="fa-solid fa-floppy-disk text-indigo-400"></i>
+                        <span>Local Settings</span>
+                        <i class="fa-solid fa-chevron-down text-xs"></i>
+                    </button>
+                    <div id="config-popover" class="hidden absolute right-0 mt-2 w-60 bg-gray-900 border brand-border rounded-lg shadow-xl z-20 p-3">
+                        <p class="text-xs text-gray-400 mb-2">Your Watchers 👁️ and API Sources are saved in this browser.</p>
+                        <button id="reset-config-btn" class="w-full text-left px-3 py-2 text-sm font-semibold rounded-md bg-red-800 hover:bg-red-700 transition-all shadow text-white">
+                            <i class="fa-solid fa-arrow-rotate-left mr-2"></i>Reset to Defaults
+                        </button>
+                    </div>
+                </div>
+                <button id="global-stop-btn" class="hidden px-4 py-2 text-sm font-semibold rounded-md bg-red-700 hover:bg-red-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5 text-white">
+                    <i class="fa-solid fa-stop mr-2"></i>Stop Scan
+                </button>
+                <div id="status-indicator" class="flex items-center space-x-2">
+                    <span id="status-text" class="text-sm text-gray-400">Idle</span>
+                    <div id="status-dot" class="w-3 h-3 bg-gray-500 rounded-full transition-colors"></div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="border-b brand-border flex items-center px-4 space-x-2">
+        <button class="view-tab-btn active-view-tab" data-view="scanner-view"><i class="fa-solid fa-stream mr-2"></i>Scanner Feed</button>
+        <button class="view-tab-btn" data-view="dashboard-view"><i class="fa-solid fa-chart-line mr-2"></i>Analytics Dashboard</button>
+    </div>
+
+    <main class="flex-1 flex flex-col md:flex-row overflow-hidden">
+        <div id="scanner-view" class="flex-1 flex flex-col md:flex-row overflow-hidden view-content">
+            <aside class="w-full md:w-1/3 lg:w-1/4 p-4 border-r brand-border overflow-y-auto flex flex-col">
+                <div>
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-lg font-semibold">Manage Watchers 👁️</h2>
+                        <button id="show-add-listener-modal-btn"
+                            class="px-3 py-1 text-sm font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
+                            <i class="fa-solid fa-plus mr-2"></i>New
+                        </button>
+                    </div>
+                    <div id="listeners-list" class="mt-2 flex-1 space-y-2 overflow-y-auto pr-2"></div>
+                </div>
+                <div class="sidebar-section">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-lg font-semibold">Manage API Sources</h2>
+                        <button id="show-add-source-modal-btn"
+                            class="px-3 py-1 text-sm font-semibold rounded-md bg-blue-800 hover:bg-blue-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
+                            <i class="fa-solid fa-plus mr-2"></i>New
+                        </button>
+                    </div>
+                    <div id="global-scan-controls" class="flex items-center gap-2 mt-2">
+                        <button id="global-scan-control-btn"
+                            class="w-full px-3 py-1 text-sm font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">
+                            <i class="fa-solid fa-play mr-2"></i>Scan All
+                        </button>
+                    </div>
+                    <div id="sources-list" class="mt-2 flex-1 space-y-2 overflow-y-auto pr-2"></div>
+                </div>
+            </aside>
+            <div id="feed-container" class="flex-1 h-full overflow-y-auto p-4 md:p-6 lg:p-8 space-y-6 flex flex-col">
+                <div id="feed-controls" class="hidden sticky top-0 bg-gray-900/80 backdrop-blur-sm z-20 py-2 flex items-center gap-2 md:gap-4 flex-wrap">
+                    <div class="relative flex-grow">
+                        <i class="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500"></i>
+                        <input type="search" id="feed-search-input" placeholder="Search title, summary, author..." class="w-full p-2 pl-10 text-sm rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="relative">
+                        <button id="filter-btn" class="px-3 py-2 text-sm font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow flex items-center gap-2">
+                            <i class="fa-solid fa-filter"></i>
+                            <span>Filter</span>
+                            <span id="filter-count-badge" class="hidden h-5 w-5 text-xs bg-blue-600 rounded-full flex items-center justify-center">0</span>
+                        </button>
+                        <div id="filter-popover" class="hidden absolute right-0 mt-2 w-64 bg-gray-900 border brand-border rounded-lg shadow-xl z-30 p-3 text-sm">
+                            <div class="flex justify-between items-center mb-2">
+                                <h4 class="font-semibold">Filter by</h4>
+                                <button id="clear-filters-btn" class="text-xs text-blue-400 hover:underline">Clear All</button>
+                            </div>
+                            <div class="space-y-3 max-h-64 overflow-y-auto pr-2">
+                                <div>
+                                    <h5 class="font-semibold text-gray-400 text-xs uppercase tracking-wider mb-1">Source</h5>
+                                    <div id="source-filters-container" class="space-y-1">
+                                        <p class="text-gray-500 italic text-xs">No sources in feed yet.</p>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h5 class="font-semibold text-gray-400 text-xs uppercase tracking-wider mb-1">Label</h5>
+                                    <div id="label-filters-container" class="space-y-1">
+                                        <p class="text-gray-500 italic text-xs">No labels in feed yet.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <button id="clear-feed-btn" class="px-3 py-2 text-sm font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow" title="Clear all items from the feed">
+                        <i class="fa-solid fa-broom mr-2"></i>Clear
+                    </button>
+                </div>
+                <div id="scan-tabs-container" class="hidden flex-wrap border-b brand-border -mt-4"></div>
+                <div id="controls-container"
+                    class="sticky top-4 z-10 p-4 rounded-lg flex flex-col items-center justify-center gap-2 text-center transition-all duration-300">
+                </div>
+                <div id="placeholder" class="text-center text-gray-500 pt-16 transition-opacity duration-300">
+                    <i class="fas fa-search fa-3x"></i>
+                    <p class="mt-4 text-lg">No scan in progress.</p>
+                    <p class="text-sm">Configure your API sources and press <i class="fa-solid fa-play"></i> Scan All to begin.</p>
+                </div>
+                <div id="feed-panes-container" class="flex-1 space-y-6"></div>
+            </div>
+        </div>
+        <div id="dashboard-view" class="hidden flex-1 flex-col overflow-y-auto p-4 md:p-6 lg:p-8 space-y-6 view-content">
+            <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
+                <h2 class="text-2xl font-bold">Daily Analytics</h2>
+                <input id="analytics-date-picker" class="p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500" type="text" placeholder="Select Date">
+            </div>
+            
+            <div id="local-storage-controls" class="hidden mb-4 p-3 bg-yellow-900/50 border border-yellow-700 rounded-lg flex items-center justify-between gap-4">
+                <p class="text-sm text-yellow-300"><i class="fa-solid fa-database mr-2"></i>Database not connected. Analytics are stored locally in your browser.</p>
+                <button id="clear-local-dashboard-btn" class="px-3 py-1 text-sm font-semibold rounded-md bg-red-800 hover:bg-red-700 transition-all shadow text-white whitespace-nowrap">
+                    <i class="fa-solid fa-broom mr-2"></i>Clear Today's Data
+                </button>
+            </div>
+
+            <div id="dashboard-kpi-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-blue-900/70 rounded-lg"><i class="fa-solid fa-search fa-2x text-blue-400"></i></div>
+                    <div>
+                        <p class="text-sm text-gray-400">Scans Started</p>
+                        <p id="kpi-scans-started" class="text-3xl font-bold">0</p>
+                    </div>
+                </div>
+                <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-green-900/70 rounded-lg"><i class="fa-solid fa-check-double fa-2x text-green-400"></i></div>
+                    <div>
+                        <p class="text-sm text-gray-400">Items Matched</p>
+                        <p id="kpi-items-matched" class="text-3xl font-bold">0</p>
+                    </div>
+                </div>
+                <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex items-center space-x-4">
+                    <div class="p-3 bg-indigo-900/70 rounded-lg"><i class="fa-solid fa-wand-magic-sparkles fa-2x text-indigo-400"></i></div>
+                    <div>
+                        <p class="text-sm text-gray-400">Summaries Generated</p>
+                        <p id="kpi-summaries-generated" class="text-3xl font-bold">0</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+                <div class="lg:col-span-3 brand-dark-bg border brand-border rounded-lg p-5 shadow-lg">
+                    <h3 class="font-semibold mb-4">Hourly Activity (Matches)</h3>
+                    <div id="hourly-activity-chart-container" class="h-64 relative"></div>
+                </div>
+                <div class="lg:col-span-2 brand-dark-bg border brand-border rounded-lg p-5 shadow-lg flex flex-col">
+                    <h3 class="font-semibold mb-4">Matches by Label</h3>
+                    <div id="matches-by-label-chart-container" class="flex-grow flex items-center justify-center h-64 relative"></div>
+                </div>
+            </div>
+            
+            <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="font-semibold">Breakdown by Source & Label</h3>
+                    <input type="text" id="source-label-table-search" placeholder="Search..." class="p-2 text-sm rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="overflow-x-auto"><table id="source-label-table" class="stats-table w-full text-sm text-left"></table></div>
+            </div>
+            
+        </div>
+    </main>
+    
+    <div id="listener-modal"
+        class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
+        <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-lg mx-4 modal-content transform scale-95">
+            <form id="listener-form">
+                <h3 id="listener-modal-title" class="text-xl font-bold mb-4">Add New Listener</h3>
+                <input type="hidden" id="original-listener-label">
+                <div class="space-y-4">
+                    <div>
+                        <label for="listener-label" class="block text-sm font-medium">Label</label>
+                        <input type="text" id="listener-label" placeholder="e.g., Bug Reports" required
+                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500">
+                        <p id="listener-label-error" class="text-red-500 text-xs mt-1 h-4"></p>
+                    </div>
+                    <div>
+                        <label for="listener-pattern" class="block text-sm font-medium">Regex Pattern</label>
+                        <div class="relative">
+                            <input type="text" id="listener-pattern" placeholder="e.g., (?i)bug" required
+                                class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500 font-mono text-sm pr-8">
+                            <div id="regex-validity-indicator" class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+                            </div>
+                        </div>
+                        <p id="listener-pattern-error" class="text-red-500 text-xs mt-1 h-4"></p>
+                    </div>
+                </div>
+                <div class="mt-6 border-t border-gray-700 pt-4">
+                    <h4 class="text-base font-semibold mb-2 flex items-center">
+                        <i class="fa-solid fa-vial mr-2 text-blue-400"></i>Regex Tester
+                    </h4>
+                    <div>
+                        <label for="regex-test-string" class="block text-sm font-medium text-gray-400">Test String</label>
+                        <textarea id="regex-test-string" rows="3" placeholder="Enter some text here to test your pattern..."
+                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"></textarea>
+                    </div>
+                    <div class="mt-2">
+                        <label class="block text-sm font-medium text-gray-400">Result</label>
+                        <div id="regex-test-result" class="mt-1 w-full p-2 rounded-md bg-gray-900 border brand-border min-h-[4rem] text-sm whitespace-pre-wrap break-words">
+                            <span class="text-gray-500">No matches found.</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex justify-end space-x-3 mt-6">
+                    <button type="button" id="cancel-listener-btn" class="px-4 py-2 font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Cancel</button>
+                    <button type="submit" id="save-listener-btn" class="px-4 py-2 font-semibold rounded-md bg-green-800 hover:bg-green-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>Save Listener</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="source-modal"
+        class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
+        <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-3xl mx-4 max-h-[90vh] flex flex-col modal-content transform scale-95">
+            <h3 id="source-modal-title" class="text-xl font-bold mb-4">Add New API Source</h3>
+            <form id="source-form" class="flex-1 overflow-y-auto pr-4 space-y-4">
+                <div id="source-presets" class="pb-4 mb-4 border-b brand-border">
+                    <label class="block text-sm font-medium mb-2">Start with a Preset</label>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="button" class="preset-btn px-3 py-1.5 text-sm font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow" data-preset="github">
+                            <i class="fa-brands fa-github mr-2"></i>GitHub Issues
+                        </button>
+                        <button type="button" class="preset-btn px-3 py-1.5 text-sm font-semibold rounded-md bg-orange-700 hover:bg-orange-600 transition-all shadow" data-preset="hn">
+                            <i class="fa-brands fa-hacker-news-square mr-2"></i>Hacker News
+                        </button>
+                        <button type="button" class="preset-btn px-3 py-1.5 text-sm font-semibold rounded-md bg-red-600 hover:bg-red-500 transition-all shadow" data-preset="reddit">
+                            <i class="fa-brands fa-reddit-alien mr-2"></i>Reddit
+                        </button>
+                        <button type="button" class="preset-btn px-3 py-1.5 text-sm font-semibold rounded-md bg-orange-500 hover:bg-orange-400 transition-all shadow" data-preset="stackoverflow">
+                            <i class="fa-brands fa-stack-overflow mr-2"></i>Stack Overflow
+                        </button>
+                        <button type="button" class="preset-btn px-3 py-1.5 text-sm font-semibold rounded-md bg-gray-900 hover:bg-black transition-all shadow" data-preset="medium">
+                            <i class="fa-brands fa-medium mr-2"></i>Medium
+                        </button>
+                        
+                    </div>
+                    <div id="preset-input-container" class="hidden mt-3">
+                        <label id="preset-input-label" for="preset-input" class="block text-sm font-medium mb-1"></label>
+                        <div class="flex items-center gap-2">
+                            <input type="text" id="preset-input" class="flex-grow w-full p-2 rounded-md bg-gray-800 border brand-border font-mono text-sm">
+                            <button type="button" id="apply-preset-btn" class="px-3 py-2 text-sm font-semibold rounded-md bg-indigo-700 hover:bg-indigo-600 transition-all shadow text-white">Apply</button>
+                        </div>
+                    </div>
+                </div>
+
+                <input type="hidden" id="original-source-name">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="source-name" class="block text-sm font-medium">Source Name (Unique)</label>
+                        <input type="text" id="source-name" placeholder="e.g., Hacker News 'AI' Stories" required
+                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label for="source-api-url" class="block text-sm font-medium">API URL</label>
+                        <div class="flex items-center gap-2 mt-1">
+                            <input type="text" id="source-api-url" placeholder="https://api.example.com/data?page={PAGE}" required
+                                class="flex-grow w-full p-2 rounded-md bg-gray-800 border brand-border font-mono text-sm">
+                            <button type="button" id="fetch-preview-btn" class="px-3 py-2 text-sm font-semibold rounded-md bg-indigo-700 hover:bg-indigo-600 transition-all shadow text-white whitespace-nowrap">
+                                <i class="fa-solid fa-wand-magic-sparkles mr-1"></i> Preview
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div id="source-preview-container" class="mt-4 border-t brand-border pt-4 hidden">
+                    <h4 class="text-md font-semibold mb-2 flex justify-between items-center">
+                        <span>API Response Preview</span>
+                        <span id="selected-path-display" class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded"></span>
+                    </h4>
+                    <div id="preview-status" class="p-3 rounded-md bg-gray-800/50 text-center text-gray-400">
+                        Click "Preview" to load sample data from your API.
+                    </div>
+                    <div id="preview-content" class="hidden">
+                        <div class="flex gap-2 mb-2">
+                            <button type="button" class="preview-tab-btn active-tab" data-tab="interactive">Interactive Mapper</button>
+                            <button type="button" class="preview-tab-btn" data-tab="raw">Raw JSON</button>
+                        </div>
+                        <div id="preview-interactive-tab" class="preview-tab-content">
+                            <p class="text-xs text-gray-400 mb-2">
+                                For <b>Field Mappings</b>, click a value, then a target button <i class="fa-solid fa-crosshairs text-blue-400"></i>. For <b>Fields to Check</b>, simply toggle the checkbox next to a key.
+                            </p>
+                            <div id="interactive-preview-item" class="p-3 rounded-md bg-gray-900/70 border brand-border max-h-64 overflow-y-auto text-sm font-mono"></div>
+                        </div>
+                        <div id="preview-raw-tab" class="preview-tab-content hidden">
+                            <pre class="w-full max-h-64 overflow-auto rounded-md bg-gray-900/70 border brand-border p-3"><code id="raw-json-preview" class="text-xs"></code></pre>
+                        </div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="source-data-root" class="block text-sm font-medium">Data Root Path (optional)</label>
+                        <input type="text" id="source-data-root" placeholder="e.g., results.data"
+                            class="mt-1 w-full p-2 rounded-md bg-gray-800 border brand-border font-mono text-sm">
+                        <p class="text-xs text-gray-400 mt-1">Path to the array of items. Leave blank if the response is the array.</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Fields to Check for Keywords</label>
+                        <div id="fields-to-check-container" class="mt-1 w-full p-2 min-h-[60px] rounded-md bg-gray-800 border brand-border flex flex-wrap gap-2 items-start">
+                                </div>
+                        <textarea id="source-fields-to-check" class="hidden"></textarea>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium">Field Mappings</label>
+                        <p class="text-xs text-gray-400 mb-2">
+                            Use the <span class="font-bold text-indigo-400">Previewer</span> above. Click a value, then click the <i class="fa-solid fa-crosshairs text-blue-400"></i> icon for the field you want to map.
+                        </p>
+                    <div id="mapping-inputs-container" class="space-y-2">
+                    </div>
+                    <textarea id="source-field-mappings" class="hidden"></textarea>
+                </div>
+                
+                <div class="flex justify-end space-x-3 mt-6 pt-4 border-t brand-border">
+                    <button type="button" id="cancel-source-btn" class="px-4 py-2 font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Cancel</button>
+                    <button type="submit" id="save-source-btn" class="px-4 py-2 font-semibold rounded-md bg-blue-800 hover:bg-blue-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Save Source</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="related-modal"
+        class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
+        <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-3xl mx-4 max-h-[90vh] flex flex-col modal-content transform scale-95">
+            <div class="flex justify-between items-start mb-4">
+                <div class="flex-1 mr-4">
+                    <h3 class="text-xl font-bold mb-1">Related Items</h3>
+                    <p id="related-modal-source-title" class="text-sm text-gray-400 truncate">Sourced from: "..."</p>
+                </div>
+                <button id="cancel-related-btn" class="text-gray-500 hover:text-white transition-colors">
+                    <i class="fa-solid fa-times fa-xl"></i>
+                </button>
+            </div>
+            <div class="mb-4 p-3 bg-gray-900/50 border border-indigo-700 rounded-lg text-sm">
+                <details>
+                    <summary class="font-semibold text-indigo-300 cursor-pointer">
+                        <i class="fa-solid fa-brain mr-2"></i>How does "Find Related" work?
+                    </summary>
+                    <div class="mt-2 pt-2 border-t border-indigo-900 text-gray-400 space-y-2">
+                        <p>This feature uses a powerful ranking algorithm called <strong>Reciprocal Rank Fusion (RRF)</strong> to intelligently combine the results from two different search methods.</p>
+                        
+                        <p>Think of it like searching for a restaurant. You might use a review app that ranks by <em>taste</em> (like our <strong>Semantic Search</strong>, which understands meaning) and a map app that ranks by <em>distance</em> (like our <strong>Keyword Search</strong>, which matches words). RRF is the smart process that looks at both ranked lists to find the restaurant that is both highly-rated and nearby.</p>
+
+                        <p>It works by looking at the <strong>rank</strong> (1st, 2nd, 3rd, etc.) of each item in both search results. An item scores highly if it appears near the top of <em>either</em> list. This means a great conceptual match won't get buried just because it's missing a keyword, and vice-versa. The result is a single, superior list that gives you deeper and more accurate insights. 🧠</p>
+                    </div>
+                </details>
+            </div>
+            <div id="related-modal-content" class="flex-1 overflow-y-auto pr-2 -mr-2 space-y-3">
+                </div>
+            <div id="related-pagination-controls" class="flex justify-between items-center mt-4 pt-4 border-t brand-border">
+                </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

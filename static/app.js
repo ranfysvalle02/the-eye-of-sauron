@@ -183,7 +183,7 @@ function initializeApp() {
         labelFiltersContainer: document.getElementById('label-filters-container'),
         clearFiltersBtn: document.getElementById('clear-filters-btn'),
     };
-    
+   
     let currentPatterns = [];
     let apiSources = [];
     let activeScan = { sourceName: null, nextPage: 1 };
@@ -195,7 +195,7 @@ function initializeApp() {
     const requiredMappings = ["id", "title", "url", "text", "by", "time"];
     let listenerFormValidity = { label: false, pattern: false };
     let clientSideStop = false;
-    
+   
     // State for filtering and sorting
     let currentSort = 'newest';
     let activeFilters = { sources: new Set(), labels: new Set() };
@@ -222,7 +222,7 @@ function initializeApp() {
             fieldsToCheck: ["title", "body"]
         },
         hn: {
-            promptLabel: "Hacker News Query",
+            promptLabel: "Hacker News Story Query",
             promptPlaceholder: "e.g., AI",
             defaultInput: "AI",
             name: (query) => `Hacker News '${query}' Stories`,
@@ -231,7 +231,17 @@ function initializeApp() {
             fieldMappings: { "id": "objectID", "title": "title", "url": "url", "text": "story_text", "by": "author", "time": "created_at" },
             fieldsToCheck: ["title", "story_text"]
         },
-        reddit: {
+        'hn-comments': {
+            promptLabel: "Hacker News Comment Query",
+            promptPlaceholder: "e.g., mongodb",
+            defaultInput: "mongodb",
+            name: (query) => `Hacker News '${query}' Comments`,
+            apiUrl: (query) => `http://hn.algolia.com/api/v1/search_by_date?query=${encodeURIComponent(query)}&tags=comment&page={PAGE}`,
+            dataRoot: "hits",
+            fieldMappings: { "id": "objectID", "title": "story_title", "url": "story_url", "text": "comment_text", "by": "author", "time": "created_at" },
+            fieldsToCheck: ["comment_text"]
+        },
+        'reddit': {
             promptLabel: "Subreddit & Query",
             promptPlaceholder: "e.g., programming/rust",
             defaultInput: "programming/rust",
@@ -241,20 +251,10 @@ function initializeApp() {
             fieldMappings: { "id": "data.id", "title": "data.title", "url": "data.permalink", "text": "data.selftext", "by": "data.author", "time": "data.created_utc" },
             fieldsToCheck: ["data.title", "data.selftext"]
         },
-        stackoverflow: {
-            promptLabel: "Stack Overflow Query",
-            promptPlaceholder: "e.g., python async",
-            defaultInput: "python async",
-            name: (query) => `Stack Overflow '${query}'`,
-            apiUrl: (query) => `https://api.stackexchange.com/2.3/search/advanced?pagesize=50&order=desc&sort=creation&q=${encodeURIComponent(query)}&site=stackoverflow`,
-            dataRoot: "items",
-            fieldMappings: { "id": "question_id", "title": "title", "url": "link", "text": "title", "by": "owner.display_name", "time": "creation_date" },
-            fieldsToCheck: ["title"]
-        },
-        medium: {
+        'medium': {
             promptLabel: "Medium Tag",
-            promptPlaceholder: "e.g., machine-learning",
-            defaultInput: "machine-learning",
+            promptPlaceholder: "e.g., programming",
+            defaultInput: "programming",
             name: (tag) => `Medium Tag '${tag}'`,
             apiUrl: (tag) => `https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fmedium.com%2Ffeed%2Ftag%2F${encodeURIComponent(tag)}`,
             dataRoot: "items",
@@ -291,7 +291,7 @@ function initializeApp() {
     async function loadConfiguration() {
         const localPatterns = localStorage.getItem('localPatterns');
         const localApiSources = localStorage.getItem('localApiSources');
-        
+       
         let patternsLoaded = false;
         let sourcesLoaded = false;
 
@@ -309,7 +309,7 @@ function initializeApp() {
                 sourcesLoaded = true;
             } catch (e) { console.error("Could not parse local sources", e); }
         }
-        
+       
         updateConfigStatusIndicator();
 
         if (!patternsLoaded) {
@@ -334,7 +334,7 @@ function initializeApp() {
             ui.configStatusContainer.classList.add('hidden');
         }
     }
-    
+   
     async function handleResetConfig() {
         if (confirm("Are you sure you want to reset your Listeners and API Sources to the server defaults? This action cannot be undone.")) {
             localStorage.removeItem('localPatterns');
@@ -405,7 +405,7 @@ function initializeApp() {
         }));
     };
     const updateSources = () => updateDataOnServer('/api-sources', apiSources);
-    
+   
     function renderSources() {
         ui.sourcesList.innerHTML = apiSources.length === 0
             ? '<p class="text-sm text-gray-500 italic p-2 text-center">Add an API source to scan.</p>'
@@ -414,7 +414,7 @@ function initializeApp() {
             const div = document.createElement('div');
             const isScanning = isGlobalScanActive && ['scanning', 'manually_paused', 'scan_paused'].includes(currentStatus);
             div.className = `flex items-center justify-between p-2 rounded-md bg-gray-800/50 hover:bg-gray-800/80 transition-all shadow-md border ${isScanning ? 'scanning-source' : 'brand-border'}`;
-            
+           
             const scanIndicatorHTML = isScanning
                 ? `<div class="scan-indicator w-8 text-center"><i class="fa-solid fa-spinner fa-spin text-blue-400 text-lg" title="Scanning..."></i></div>`
                 : '';
@@ -461,10 +461,10 @@ function initializeApp() {
                 cleanPattern = patternStr.substring(4);
                 flags += 'i';
             }
-            
+           
             const regex = new RegExp(cleanPattern, flags);
             const highlighted = testStr.replace(regex, (match) => `<span class="regex-match">${match}</span>`);
-            
+           
             if (highlighted !== testStr) {
                 resultEl.innerHTML = highlighted;
             } else {
@@ -516,7 +516,7 @@ function initializeApp() {
         const newLabel = ui.listenerLabelInput.value.trim();
         const originalLabel = ui.originalListenerLabelInput.value;
         const errorEl = ui.listenerLabelError;
-        
+       
         if (!newLabel) {
             errorEl.textContent = 'Label cannot be empty.';
             listenerFormValidity.label = false;
@@ -540,11 +540,11 @@ function initializeApp() {
     function updateSaveButtonState() {
         ui.saveListenerBtn.disabled = !(listenerFormValidity.label && listenerFormValidity.pattern);
     }
-    
+   
     function showPresetInput(presetKey) {
         const preset = sourcePresets[presetKey];
         if (!preset) return;
-    
+   
         ui.presetInputContainer.classList.remove('hidden');
         ui.presetInputLabel.textContent = preset.promptLabel;
         ui.presetInput.placeholder = preset.promptPlaceholder;
@@ -552,7 +552,7 @@ function initializeApp() {
         ui.applyPresetBtn.dataset.presetKey = presetKey;
         ui.presetInput.focus();
     }
-    
+   
     function handleApplyPreset() {
         const presetKey = ui.applyPresetBtn.dataset.presetKey;
         const userInput = ui.presetInput.value.trim();
@@ -569,7 +569,7 @@ function initializeApp() {
             }
             const subreddit = parts[0].trim();
             const query = parts.slice(1).join('/').trim();
-            
+           
             if (!subreddit || !query) {
                 alert("Invalid format. Subreddit and query cannot be empty.");
                 return;
@@ -582,15 +582,15 @@ function initializeApp() {
             ui.sourceNameInput.value = preset.name(userInput);
             ui.sourceApiUrlInput.value = preset.apiUrl(userInput);
         }
-    
+   
         ui.sourceDataRootInput.value = preset.dataRoot;
-        
+       
         currentFieldsToCheck = [...preset.fieldsToCheck];
         renderFieldsToCheck();
-    
+   
         ui.sourceFieldMappingsTextarea.value = JSON.stringify(preset.fieldMappings, null, 2);
         populateMappingsFromTextarea();
-        
+       
         ui.presetInputContainer.classList.add('hidden');
     }
 
@@ -603,10 +603,10 @@ function initializeApp() {
         ui.listenerModal.addEventListener('click', (e) => { if (e.target === ui.listenerModal) closeModal('listener'); });
         ui.sourceModal.addEventListener('click', (e) => { if (e.target === ui.sourceModal) closeModal('source'); });
         ui.relatedModal.addEventListener('click', (e) => { if (e.target === ui.relatedModal) closeModal('related'); });
-        
+       
         ui.listenerForm.addEventListener('submit', handleSave);
         ui.sourceForm.addEventListener('submit', handleSave);
-        
+       
         ui.globalStopBtn.addEventListener('click', handleStopScan);
 
         // Listener for source scan toggles
@@ -629,7 +629,7 @@ function initializeApp() {
             if (ui.filterPopover && !ui.filterBtn.contains(e.target) && !ui.filterPopover.contains(e.target)) {
                 ui.filterPopover.classList.add('hidden');
             }
-            
+           
             const btn = e.target.closest('.edit-btn, .remove-btn');
             if (btn) {
                 const { type, ...data } = btn.dataset;
@@ -657,7 +657,7 @@ function initializeApp() {
             if(e.target.matches('.preview-tab-btn')) handleTabSwitch(e.target);
             if(e.target.closest('.json-value')) handleJsonItemClick(e.target.closest('.json-value'));
             if(e.target.closest('.mapping-target-btn')) handleMappingTargetClick(e.target.closest('.mapping-target-btn'));
-            
+           
             const presetBtn = e.target.closest('.preset-btn');
             if (presetBtn && !presetBtn.disabled) {
                 showPresetInput(presetBtn.dataset.preset);
@@ -695,7 +695,7 @@ function initializeApp() {
             testRegexLocally();
         });
         ui.regexTestString.addEventListener('input', testRegexLocally);
-        
+       
         ui.clearLocalDashboardBtn.addEventListener('click', handleClearLocalDashboard);
     }
 
@@ -703,7 +703,7 @@ function initializeApp() {
         const isEdit = data !== null;
         const modal = ui[`${type}Modal`];
         const modalContent = modal.querySelector('.modal-content');
-        
+       
         if (type !== 'related') {
             const form = ui[`${type}Form`];
             form.reset();
@@ -716,7 +716,7 @@ function initializeApp() {
             ui.regexValidityIndicator.innerHTML = '';
             ui.regexTestString.value = '';
             ui.regexTestResult.innerHTML = '<span class="text-gray-500">Enter a pattern and test string.</span>';
-            
+           
             ui.originalListenerLabelInput.value = isEdit ? data.label : '';
             if (isEdit) {
                 const p = currentPatterns.find(p => p.label === data.label);
@@ -927,7 +927,7 @@ function initializeApp() {
         setStatus(data.status, data.reason || data.status);
         if (data.source_name) activeScan.sourceName = data.source_name;
         if (data.next_page) activeScan.nextPage = data.next_page;
-        
+       
         const isScanInProgress = ['scanning', 'scan_paused', 'manually_paused'].includes(data.status);
 
         if (['idle', 'error'].includes(data.status)) {
@@ -1073,17 +1073,17 @@ function initializeApp() {
             }, 3000);
         }
     }
-    
+   
     async function handleFindRelated(btn) {
         const card = btn.closest('.feed-card');
         const itemData = JSON.parse(card.dataset.itemData);
         const query = `${itemData.title}\n${itemData.ai_summary}`;
-        
+       
         ui.relatedModalSourceTitle.textContent = `Sourced from: "${itemData.title}"`;
         ui.relatedModalContent.innerHTML = `<div class="text-center text-gray-400 p-8"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><p class="mt-3">Searching for related items...</p></div>`;
         document.getElementById('related-pagination-controls').innerHTML = '';
         openModal('related');
-        
+       
         try {
             const response = await fetch('/hybrid-search', {
                 method: 'POST',
@@ -1091,11 +1091,11 @@ function initializeApp() {
                 body: JSON.stringify({ query })
             });
             const results = await response.json();
-            
+           
             if (!response.ok) {
                 throw new Error(results.error || 'An unknown error occurred.');
             }
-            
+           
             const filteredResults = results.filter(result => String(result.id) !== String(itemData.id));
 
             allRelatedResults = filteredResults;
@@ -1106,7 +1106,7 @@ function initializeApp() {
             } else {
                 renderRelatedItemsPage(currentRelatedPage);
             }
-            
+           
         } catch (error) {
             ui.relatedModalContent.innerHTML = `<div class="text-center text-red-400 p-8"><i class="fa-solid fa-triangle-exclamation fa-2x"></i><p class="mt-3"><strong>Search Failed:</strong> ${error.message}</p></div>`;
         }
@@ -1157,7 +1157,7 @@ function initializeApp() {
     function renderRelatedItemCard(item) {
         const card = document.createElement('div');
         card.className = 'flex items-start p-3 bg-gray-900/50 border brand-border rounded-lg gap-4';
-        
+       
         card.innerHTML = `
             <div class="text-center shrink-0 w-20">
                 <div class="font-bold text-xl text-indigo-300">${item.score.toFixed(3)}</div>
@@ -1225,7 +1225,7 @@ function initializeApp() {
         if (!previewData) return;
         const dataRoot = ui.sourceDataRootInput.value.trim();
         const items = getNestedValue(previewData, dataRoot);
-        
+       
         if (Array.isArray(items) && items.length > 0) {
             renderInteractiveJson(items[0], ui.interactivePreviewItem, dataRoot ? `${dataRoot}.0` : '0');
             ui.sourceDataRootInput.classList.remove('border-red-500');
@@ -1242,7 +1242,7 @@ function initializeApp() {
 
     function renderInteractiveJson(obj, container, pathPrefix = '') {
         container.innerHTML = '';
-        
+       
         const getRelativePath = (fullPath) => {
             const dataRoot = ui.sourceDataRootInput.value.trim();
             let relativePath = fullPath;
@@ -1263,9 +1263,9 @@ function initializeApp() {
             const pathParts = pathPrefix ? path.replace(pathPrefix, '').split('.') : path.split('.');
             const paddingDepth = Math.max(0, pathParts.length - 1);
             entry.style.paddingLeft = `${paddingDepth}rem`;
-            
+           
             const keySpan = `<span class="json-key">"${key}": </span>`;
-            
+           
             if (isObject) {
                 entry.innerHTML = keySpan + (Array.isArray(value) ? '[' : '{');
                 container.appendChild(entry);
@@ -1353,7 +1353,7 @@ function initializeApp() {
             ui.mappingInputsContainer.appendChild(div);
         });
     }
-    
+   
     function syncMappingsToTextarea() {
         const mappings = {};
         ui.mappingInputsContainer.querySelectorAll('input[data-key]').forEach(input => {
@@ -1361,7 +1361,7 @@ function initializeApp() {
         });
         ui.sourceFieldMappingsTextarea.value = JSON.stringify(mappings, null, 2);
     }
-    
+   
     function populateMappingsFromTextarea() {
         try {
             const mappings = JSON.parse(ui.sourceFieldMappingsTextarea.value);
@@ -1375,7 +1375,7 @@ function initializeApp() {
             console.warn("Could not parse initial field mappings.", e);
         }
     }
-    
+   
     function handleMappingTargetClick(target) {
         if (!selectedJsonPath) {
             ui.selectedPathDisplay.textContent = 'Select a value from the preview first!';
@@ -1387,11 +1387,11 @@ function initializeApp() {
         if (input) {
             input.value = selectedJsonPath;
             syncMappingsToTextarea();
-            
+           
             ui.selectedPathDisplay.textContent = `Mapped '${key}'!`;
             document.querySelectorAll('.selected-json-path').forEach(el => el.classList.remove('selected-json-path'));
             document.body.classList.remove('path-selected');
-            
+           
             input.classList.add('bg-green-900/50', 'border-green-500');
             setTimeout(() => {
                 input.classList.remove('bg-green-900/50', 'border-green-500');
@@ -1437,13 +1437,13 @@ function initializeApp() {
             fetchAndRenderDashboard(currentAnalyticsDate);
         }
     }
-    
+   
     function handleClearFeed() {
         tearDownTabs();
         ui.feedPanesContainer.innerHTML = '<div class="flex-1 space-y-6"></div>'; // Reset to single pane structure
         ui.placeholder.classList.remove('hidden');
         ui.feedControls.classList.add('hidden');
-        
+       
         // Reset filters
         activeFilters = { sources: new Set(), labels: new Set() };
         availableFilters = { sources: new Set(), labels: new Set() };
@@ -1456,12 +1456,12 @@ function initializeApp() {
     // --- NEW / REFACTORED: Filter and Sort Logic ---
     const applyFiltersAndSort = debounce(() => {
         const searchTerm = ui.feedSearchInput.value.toLowerCase();
-    
+   
         // 1. First pass: filter all cards across all panes by setting their display property
         document.querySelectorAll('.feed-card').forEach(card => {
             const itemData = JSON.parse(card.dataset.itemData);
             let isVisible = true;
-        
+       
             // Search filter
             if (searchTerm) {
                 const searchText = [itemData.title, itemData.by, itemData.ai_summary].join(' ').toLowerCase();
@@ -1469,30 +1469,30 @@ function initializeApp() {
                     isVisible = false;
                 }
             }
-        
+       
             // Source tag filter
             if (isVisible && activeFilters.sources.size > 0 && !activeFilters.sources.has(itemData.source_name)) {
                 isVisible = false;
             }
-        
+       
             // Label tag filter
             if (isVisible && activeFilters.labels.size > 0 && !activeFilters.labels.has(itemData.matched_label)) {
                 isVisible = false;
             }
-        
+       
             card.style.display = isVisible ? '' : 'none';
         });
-    
+   
         // 2. Second pass: sort ALL cards within each pane (hidden and visible)
         document.querySelectorAll('.feed-pane').forEach(pane => {
             const allCardsInPane = Array.from(pane.querySelectorAll('.feed-card'));
-        
+       
             allCardsInPane.sort((a, b) => {
                 const timeA = JSON.parse(a.dataset.itemData).time || 0;
                 const timeB = JSON.parse(b.dataset.itemData).time || 0;
                 return currentSort === 'newest' ? timeB - timeA : timeA - timeB;
             });
-        
+       
             // 3. Re-append ALL sorted cards to the DOM. Their visibility was already set.
             allCardsInPane.forEach(card => pane.appendChild(card));
         });
@@ -1525,7 +1525,7 @@ function initializeApp() {
                 ui.sourceFiltersContainer.appendChild(createFilterCheckbox('sources', source));
             });
         }
-        
+       
         // Render Label Filters
         if (availableFilters.labels.size === 0) {
             ui.labelFiltersContainer.innerHTML = '<p class="text-gray-500 italic text-xs">No labels in feed yet.</p>';
@@ -1536,7 +1536,7 @@ function initializeApp() {
             });
         }
     }
-    
+   
     function updateFilterBadge() {
         const count = activeFilters.sources.size + activeFilters.labels.size;
         if (count > 0) {
@@ -1546,7 +1546,7 @@ function initializeApp() {
             ui.filterCountBadge.classList.add('hidden');
         }
     }
-    
+   
     function setupFilterAndSortControls() {
         ui.feedSearchInput.addEventListener('input', applyFiltersAndSort);
         ui.filterBtn.addEventListener('click', () => {
@@ -1658,14 +1658,14 @@ function initializeApp() {
         renderKpiCards(stats);
         renderHourlyChart(stats.hourlyActivity);
         renderLabelChart(stats.matchesByLabel);
-        
+       
         const sourceLabelData = [];
         for (const [source, labels] of Object.entries(stats.matchesBySourceLabel || {})) {
             for (const [label, count] of Object.entries(labels)) {
                 sourceLabelData.push({ source: source.replace(/_/g,'.'), label: label.replace(/_/g,'.'), count });
             }
         }
-        
+       
         renderInteractiveTable(
             'source-label-table', 
             'source-label-table-search',
@@ -1709,7 +1709,7 @@ function initializeApp() {
         ui.kpiItemsMatched.textContent = stats.totalItemsMatched || 0;
         ui.kpiSummariesGenerated.textContent = stats.totalSummariesGenerated || 0;
     }
-    
+   
     function renderHourlyChart(hourlyData) {
         const chartContainer = document.getElementById('hourly-activity-chart-container');
         if (dashboardCharts.hourly) dashboardCharts.hourly.destroy();
@@ -1743,7 +1743,7 @@ function initializeApp() {
             }
         });
     }
-    
+   
     function renderLabelChart(labelData) {
         const chartContainer = document.getElementById('matches-by-label-chart-container');
         if (dashboardCharts.labels) dashboardCharts.labels.destroy();
@@ -1756,7 +1756,7 @@ function initializeApp() {
 
         const canvas = document.createElement('canvas');
         chartContainer.appendChild(canvas);
-        
+       
         const labels = Object.keys(labelData).map(l => l.replace(/_/g, '.'));
         const data = Object.values(labelData);
         const colors = ['#00ED64', '#3b82f6', '#f59e0b', '#ef4444', '#818cf8', '#ec4899', '#14b8a6'];
@@ -1793,7 +1793,7 @@ function initializeApp() {
                     columns.some(col => String(row[col.key]).toLowerCase().includes(searchTerm))
                 );
             }
-            
+           
             const sort = tableSortState[tableId] || {};
             if (sort.key) {
                 filteredData.sort((a, b) => {
@@ -1839,7 +1839,7 @@ function initializeApp() {
         searchInput.addEventListener('keyup', debounce(render, 200));
         render();
     }
-    
+   
     // --- Stream Connection ---
     function connectToStream() {
         if (eventSource) return;
@@ -1851,11 +1851,11 @@ function initializeApp() {
                 return;
             }
             const data = JSON.parse(event.data);
-            
+           
             const isDashboardActive = !ui.dashboardView.classList.contains('hidden');
             const today = new Date().toISOString().split('T')[0];
             const shouldRefreshDashboard = isDashboardActive && currentAnalyticsDate === today;
-            
+           
             if (isMongoDbEnabled && shouldRefreshDashboard && (data.type === 'api_item' || data.type === 'summary_update' || (data.type === 'status' && data.status === 'scanning'))) {
                 fetchAndRenderDashboard(currentAnalyticsDate);
             }
@@ -1867,7 +1867,7 @@ function initializeApp() {
                 case 'status':
                     if (clientSideStop && data.status !== 'idle' && data.status !== 'error') return; 
                     if (data.status === 'idle' || data.status === 'error') clientSideStop = false;
-                    
+                   
                     handleStatusUpdate(data);
                     if (data.status !== 'scanning') cardAnimationDelay = 0;
                     break;
@@ -1888,7 +1888,7 @@ function initializeApp() {
 
                     if (!document.querySelector(`[data-item-id="${data.id}"]`)) {
                         const card = createFeedCard(data, cardAnimationDelay);
-                        
+                       
                         // Check visibility against current filters before appending
                         let isVisible = true;
                         const searchTerm = ui.feedSearchInput.value.toLowerCase();

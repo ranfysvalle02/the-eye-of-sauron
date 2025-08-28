@@ -135,15 +135,51 @@ DEFAULT_API_SOURCES = json.dumps([
     },
     {
         "name": "Hacker News 'AI' Stories",
-        "apiUrl": "http://hn.algolia.com/api/v1/search_by_date?query=ai&tags=story&page={PAGE}",
+        "apiUrl": "https://hn.algolia.com/api/v1/search_by_date?query=ai&tags=story&page={PAGE}",
         "httpMethod": "GET",
         "paginationStyle": "page_number",
+        "paginationZeroIndexed": True,
         "dataRoot": "hits",
         "fieldMappings": {
             "id": "objectID", "title": "title", "url": "url",
             "text": "story_text", "by": "author", "time": "created_at"
         },
         "fieldsToCheck": ["title", "story_text"]
+    },
+    {
+        "name": "Hacker News 'AI' Comments",
+        "apiUrl": "https://hn.algolia.com/api/v1/search_by_date?query=ai&tags=comment&page={PAGE}",
+        "httpMethod": "GET",
+        "paginationStyle": "page_number",
+        "paginationZeroIndexed": True,
+        "dataRoot": "hits",
+        "fieldMappings": {
+            "id": "objectID", "title": "story_title", "url": "story_url",
+            "text": "comment_text", "by": "author", "time": "created_at"
+        },
+        "fieldsToCheck": ["story_title", "comment_text"]
+    },
+    {
+        "id": "medium-tag",
+        "name": "Medium Tag Search",
+        "description": "Searches for recent posts with a specific tag on Medium.",
+        "variables": [
+            {"name": "Tag", "key": "{TAG}", "placeholder": "e.g., programming"}
+        ],
+        "config": {
+            "name": "Medium Tag '{TAG}'",
+            "apiUrl": "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fmedium.com%2Ffeed%2Ftag%2F{TAG}",
+            "dataRoot": "items",
+            "fieldMappings": {
+                "id": "guid",
+                "title": "title",
+                "url": "link",
+                "text": "description",
+                "by": "author",
+                "time": "pubDate"
+            },
+            "fieldsToCheck": ["title", "description"]
+        }
     }
 ])
 API_SOURCES = {}
@@ -151,24 +187,6 @@ sources_lock = threading.Lock()
 
 # --- API Source Template Configuration ---
 API_SOURCE_TEMPLATES = [
-    {
-        "id": "hn-search",
-        "name": "Hacker News Search",
-        "description": "Searches for stories on Hacker News by date.",
-        "variables": [
-            {"name": "Query", "key": "{QUERY}", "placeholder": "e.g., ai"}
-        ],
-        "config": {
-            "name": "Hacker News '{QUERY}' Stories",
-            "apiUrl": "http://hn.algolia.com/api/v1/search_by_date?query={QUERY}&tags=story&page={PAGE}",
-            "dataRoot": "hits",
-            "fieldMappings": {
-                "id": "objectID", "title": "title", "url": "url",
-                "text": "story_text", "by": "author", "time": "created_at"
-            },
-            "fieldsToCheck": ["title", "story_text"]
-        }
-    },
     {
         "id": "github-issues",
         "name": "GitHub Repo Issues",
@@ -187,13 +205,48 @@ API_SOURCE_TEMPLATES = [
             },
             "fieldsToCheck": ["title", "body"]
         }
+    },
+    {
+        "id": "hn-story-search",
+        "name": "Hacker News Story Search",
+        "description": "Searches for stories on Hacker News by date.",
+        "variables": [
+            {"name": "Query", "key": "{QUERY}", "placeholder": "e.g., ai"}
+        ],
+        "config": {
+            "name": "Hacker News '{QUERY}' Stories",
+            "apiUrl": "https://hn.algolia.com/api/v1/search_by_date?query={QUERY}&tags=story&page={PAGE}",
+            "dataRoot": "hits",
+            "fieldMappings": {
+                "id": "objectID", "title": "title", "url": "url",
+                "text": "story_text", "by": "author", "time": "created_at"
+            },
+            "fieldsToCheck": ["title", "story_text"]
+        }
+    },
+    {
+        "id": "hn-comment-search",
+        "name": "Hacker News Comment Search",
+        "description": "Searches for comments on Hacker News by date.",
+        "variables": [
+            {"name": "Query", "key": "{QUERY}", "placeholder": "e.g., mongodb"}
+        ],
+        "config": {
+            "name": "Hacker News '{QUERY}' Comments",
+            "apiUrl": "https://hn.algolia.com/api/v1/search_by_date?query={QUERY}&tags=comment&page={PAGE}",
+            "dataRoot": "hits",
+            "fieldMappings": {
+                "id": "objectID", "title": "story_title", "url": "story_url",
+                "text": "comment_text", "by": "author", "time": "created_at"
+            },
+            "fieldsToCheck": ["story_title", "comment_text"]
+        }
     }
 ]
 
 # --- Common Request Headers ---
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Accept": "application/vnd.github.v3+json"
 }
 
 # --- GitHub Personal Access Token (PAT) Configuration ---
@@ -549,6 +602,7 @@ def perform_api_scan(source_config, start_page=1):
         update_queue.put({"type": "status", "status": "error", "reason": f"Missing 'apiUrl' in config for {source_name}"})
         return
 
+    is_zero_indexed = source_config.get("paginationZeroIndexed", False)
     current_page = start_page
     try:
         for i in range(PAGES_PER_SCAN):
@@ -564,13 +618,16 @@ def perform_api_scan(source_config, start_page=1):
                 logging.warning(f"API scan for {source_name} paused due to rate limit.")
                 return
 
-            api_url = api_url_template.replace("{PAGE}", str(current_page))
-            logging.info(f"Fetching page {current_page} from {source_name} ({api_url})...")
+            page_to_request = current_page - 1 if is_zero_indexed else current_page
+            api_url = api_url_template.replace("{PAGE}", str(page_to_request))
+            logging.info(f"Fetching page {current_page} (API page {page_to_request}) from {source_name} ({api_url})...")
             update_queue.put({"type": "status", "status": "scanning", "reason": f"Fetching page {current_page} from {source_name}...", "source_name": source_name})
 
             request_headers = HEADERS.copy()
-            if GITHUB_PAT and "api.github.com" in api_url:
-                request_headers["Authorization"] = f"Bearer {GITHUB_PAT}"
+            if "api.github.com" in api_url:
+                request_headers["Accept"] = "application/vnd.github.v3+json"
+                if GITHUB_PAT:
+                    request_headers["Authorization"] = f"Bearer {GITHUB_PAT}"
 
             response = requests.get(api_url, headers=request_headers, timeout=20)
             response.raise_for_status()
@@ -918,8 +975,10 @@ def preview_api_source():
 
     try:
         request_headers = HEADERS.copy()
-        if GITHUB_PAT and "api.github.com" in api_url:
-            request_headers["Authorization"] = f"Bearer {GITHUB_PAT}"
+        if "api.github.com" in api_url:
+            request_headers["Accept"] = "application/vnd.github.v3+json"
+            if GITHUB_PAT:
+                request_headers["Authorization"] = f"Bearer {GITHUB_PAT}"
         
         response = requests.get(api_url, headers=request_headers, timeout=15)
         response.raise_for_status()

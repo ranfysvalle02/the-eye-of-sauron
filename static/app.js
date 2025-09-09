@@ -1440,10 +1440,12 @@ function initializeApp() {
    
     function handleClearFeed() {
         tearDownTabs();
-        ui.feedPanesContainer.innerHTML = '<div class="flex-1 space-y-6"></div>'; // Reset to single pane structure
+        // FIX: The original code replaced the container's content with a new div, breaking the structure.
+        // The correct approach is to simply clear the inner HTML, leaving the container itself intact.
+        ui.feedPanesContainer.innerHTML = '';
         ui.placeholder.classList.remove('hidden');
         ui.feedControls.classList.add('hidden');
-       
+        
         // Reset filters
         activeFilters = { sources: new Set(), labels: new Set() };
         availableFilters = { sources: new Set(), labels: new Set() };

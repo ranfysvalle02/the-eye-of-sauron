@@ -375,7 +375,10 @@ def wait_for_index(coll, index_name: str, timeout: int = 300):
     raise TimeoutError(f"Index '{index_name}' did not become ready in {timeout}s.")
 
 def create_hybrid_search_indexes():
-    """Checks for and creates the required text and vector indexes in the background."""
+    """
+    Checks for and creates the required text and vector indexes in the background.
+    Automatically handles vector index recreation if embedding dimensions change.
+    """
     if content_collection is None:
         logging.warning("DB not available, skipping index creation.")
         return
@@ -390,7 +393,9 @@ def create_hybrid_search_indexes():
             db.create_collection(CONTENT_COLL_NAME)
             logging.info(f"✅ Collection '{CONTENT_COLL_NAME}' did not exist and was created.")
 
-        existing_indexes = [idx['name'] for idx in content_collection.list_search_indexes()]
+        # Get all search indexes as a dictionary for easy lookup
+        existing_indexes_details = list(content_collection.list_search_indexes())
+        existing_indexes = {idx['name']: idx for idx in existing_indexes_details}
         
         # 1. Create Text Search Index
         if TEXT_INDEX_NAME not in existing_indexes:
@@ -401,9 +406,32 @@ def create_hybrid_search_indexes():
         else:
             logging.info(f"ℹ️ Text index '{TEXT_INDEX_NAME}' already exists.")
 
-        # 2. Create Vector Search Index
-        if VECTOR_INDEX_NAME not in existing_indexes:
-            logging.info(f"🛠️ Creating vector index: '{VECTOR_INDEX_NAME}'...")
+        # 2. FIX: Create or Recreate Vector Search Index with dimension check
+        recreate_vector_index = False
+        if VECTOR_INDEX_NAME in existing_indexes:
+            try:
+                # Check for dimension mismatch
+                index_def = existing_indexes[VECTOR_INDEX_NAME]['definition']
+                existing_dims = index_def['mappings']['fields']['content_embedding']['dimensions']
+                if existing_dims != EMBEDDING_DIMENSIONS:
+                    logging.warning(
+                        f"⚠️ Vector index '{VECTOR_INDEX_NAME}' dimension mismatch! "
+                        f"Index has {existing_dims}, but config requires {EMBEDDING_DIMENSIONS}. Recreating index."
+                    )
+                    content_collection.drop_search_index(VECTOR_INDEX_NAME)
+                    recreate_vector_index = True
+                else:
+                    logging.info(f"ℹ️ Vector index '{VECTOR_INDEX_NAME}' already exists and dimensions match.")
+            except (KeyError, TypeError) as e:
+                logging.warning(f"Could not parse existing vector index '{VECTOR_INDEX_NAME}'. Recreating it. Error: {e}")
+                content_collection.drop_search_index(VECTOR_INDEX_NAME)
+                recreate_vector_index = True
+        else:
+            # Index does not exist at all
+            recreate_vector_index = True
+
+        if recreate_vector_index:
+            logging.info(f"🛠️ Creating vector index '{VECTOR_INDEX_NAME}' with {EMBEDDING_DIMENSIONS} dimensions...")
             vector_index_model = {
                 "name": VECTOR_INDEX_NAME,
                 "definition": { "mappings": { "fields": { "content_embedding": {
@@ -414,8 +442,7 @@ def create_hybrid_search_indexes():
             }
             content_collection.create_search_index(model=vector_index_model)
             wait_for_index(content_collection, VECTOR_INDEX_NAME)
-        else:
-            logging.info(f"ℹ️ Vector index '{VECTOR_INDEX_NAME}' already exists.")
+            
     except (OperationFailure, TimeoutError, Exception) as e:
         logging.error(f"❌ Failed to create or verify search indexes: {e}")
 

@@ -182,6 +182,16 @@ function initializeApp() {
         sourceFiltersContainer: document.getElementById('source-filters-container'),
         labelFiltersContainer: document.getElementById('label-filters-container'),
         clearFiltersBtn: document.getElementById('clear-filters-btn'),
+        matchesView: document.getElementById('matches-view'),
+        matchesSearchInput: document.getElementById('matches-search-input'),
+        matchesFilterBtn: document.getElementById('matches-filter-btn'),
+        matchesFilterPopover: document.getElementById('matches-filter-popover'),
+        matchesFilterCountBadge: document.getElementById('matches-filter-count-badge'),
+        matchesSourceFiltersContainer: document.getElementById('matches-source-filters-container'),
+        matchesClearFiltersBtn: document.getElementById('matches-clear-filters-btn'),
+        matchesSortSelect: document.getElementById('matches-sort-select'),
+        matchesResultsContainer: document.getElementById('matches-results-container'),
+        matchesPlaceholder: document.getElementById('matches-placeholder'),
     };
    
     let currentPatterns = [];
@@ -194,13 +204,23 @@ function initializeApp() {
     let currentFieldsToCheck = [];
     const requiredMappings = ["id", "title", "url", "text", "by", "time"];
     let listenerFormValidity = { label: false, pattern: false };
-    let clientSideStop = false;
+    let clientSideStop = false; 
    
-    // State for filtering and sorting
-    let currentSort = 'newest';
-    let activeFilters = { sources: new Set(), labels: new Set() };
-    let availableFilters = { sources: new Set(), labels: new Set() };
+   // State for filtering and sorting 
+   let currentSort = 'newest'; 
+   let activeFilters = { sources: new Set(), labels: new Set() }; 
+   let availableFilters = { sources: new Set(), labels: new Set() }; 
 
+    let matchesState = {
+        query: '',
+        sources: new Set(),
+        sortOrder: 'desc',
+        currentPage: 1,
+        totalPages: 1,
+        isLoading: false,
+        isInitialized: false
+    };
+    let matchesScrollObserver = null;
     let allRelatedResults = [];
     let currentRelatedPage = 1;
     const relatedItemsPerPage = 5;
@@ -825,53 +845,60 @@ function initializeApp() {
             renderSources(); updateSources();
         }
     }
-    function createFeedCard(item, delay = 0) {
-        const card = document.createElement('div');
-        const isPending = item.summary_status === 'pending';
-        card.className = 'feed-card brand-dark-bg border brand-border rounded-lg p-5 shadow-lg card-enter-animation opacity-0';
-        card.style.animationDelay = `${delay}ms`;
-        if (isPending) card.classList.add('summary-pending');
-        card.dataset.itemId = item.id;
-        card.dataset.itemData = JSON.stringify(item);
-        const postTime = new Date(item.time * 1000).toLocaleString('en-US', { timeZone: 'UTC' });
-        const webhookUrl = localStorage.getItem('slackWebhookUrl') || '';
-        const titleLink = item.url
-            ? `<a href="${item.url}" target="_blank" class="text-xl font-bold text-white hover:text-green-400 transition-colors mb-2 sm:mb-0 break-all">${item.title}</a>`
-            : `<span class="text-xl font-bold text-white mb-2 sm:mb-0 break-all">${item.title}</span>`;
-        const viewSourceLink = item.url
-            ? `<a href="${item.url}" target="_blank" class="hover:text-green-400 transition-colors"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i> View Source</a>`
-            : `<span><i class="fa-solid fa-database mr-1"></i> ${item.source_name}</span>`;
-        const summaryHTML = isPending
-            ? `<div class="summary-content text-gray-400 text-sm"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Generating AI Summary...</div>`
-            : `<div class="summary-content markdown-content text-gray-300 text-sm">${marked.parse(item.ai_summary || '')}</div>`;
-        card.innerHTML = `
-            <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
-                ${titleLink}
-                <span class="text-xs font-mono text-white bg-blue-900/70 border border-blue-700 px-2 py-1 rounded-full w-max shrink-0 shadow-md">
-                    <i class="fa-solid fa-tag mr-1"></i> ${item.matched_label}
-                </span>
-            </div>
-            <div class="flex items-center flex-wrap gap-x-4 gap-y-2 text-xs text-gray-400 mt-2 border-b border-gray-700 pb-3 mb-3">
-                <span class="inline-flex items-center text-xs font-medium text-purple-300 bg-purple-900/50 border border-purple-700 px-2 py-0.5 rounded-full shadow">
-                    <i class="fa-solid fa-satellite-dish mr-1.5"></i> ${item.source_name}
-                </span>
-                <span><i class="fa-solid fa-user mr-1"></i> ${item.by || 'N/A'}</span>
-                <span><i class="fa-solid fa-clock mr-1"></i> ${postTime} UTC</span>
-                ${viewSourceLink}
-                <button class="send-to-slack-btn text-gray-400 hover:text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed transition-colors" ${!webhookUrl || isPending ? 'disabled' : ''} title="${!webhookUrl ? 'Enter a Slack Webhook URL' : isPending ? 'Summary not ready' : 'Send to Slack'}">
-                    <i class="fa-brands fa-slack mr-1"></i> Send to Slack
-                </button>
-                <button class="find-related-btn text-gray-400 hover:text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed transition-colors" ${isPending ? 'disabled' : ''} title="${isPending ? 'Summary not ready' : 'Find related items'}">
-                    <i class="fa-solid fa-brain mr-1"></i> Find Related
-                </button>
-            </div>
-            <div class="summary-container">
-                <h3 class="text-sm font-semibold text-green-400 mb-2">AI Summary</h3>
-                ${summaryHTML}
-            </div>
-        `;
-        return card;
-    }
+    function createFeedCard(item, delay = 0) { 
+     const card = document.createElement('div'); 
+     const isPending = item.summary_status === 'pending'; 
+     card.className = 'feed-card brand-dark-bg border brand-border rounded-lg p-5 shadow-lg card-enter-animation opacity-0'; 
+     card.style.animationDelay = `${delay}ms`; 
+     if (isPending) card.classList.add('summary-pending'); 
+     card.dataset.itemId = item.id; 
+     card.dataset.itemData = JSON.stringify(item);
+        
+        // MODIFICATION START: Handle both ISO string and Unix timestamp for time
+        const postTimeValue = typeof item.time === 'string' 
+            ? new Date(item.time) 
+            : new Date(item.time * 1000);
+     const postTime = postTimeValue.toLocaleString('en-US', { timeZone: 'UTC' });
+        // MODIFICATION END
+
+     const webhookUrl = localStorage.getItem('slackWebhookUrl') || ''; 
+     const titleLink = item.url 
+       ? `<a href="${item.url}" target="_blank" class="text-xl font-bold text-white hover:text-green-400 transition-colors mb-2 sm:mb-0 break-all">${item.title}</a>` 
+       : `<span class="text-xl font-bold text-white mb-2 sm:mb-0 break-all">${item.title}</span>`; 
+     const viewSourceLink = item.url 
+       ? `<a href="${item.url}" target="_blank" class="hover:text-green-400 transition-colors"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i> View Source</a>` 
+       : `<span><i class="fa-solid fa-database mr-1"></i> ${item.source_name}</span>`; 
+     const summaryHTML = isPending 
+       ? `<div class="summary-content text-gray-400 text-sm"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Generating AI Summary...</div>` 
+       : `<div class="summary-content markdown-content text-gray-300 text-sm">${marked.parse(item.ai_summary || '')}</div>`; 
+     card.innerHTML = ` 
+       <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-2"> 
+         ${titleLink} 
+         <span class="text-xs font-mono text-white bg-blue-900/70 border border-blue-700 px-2 py-1 rounded-full w-max shrink-0 shadow-md"> 
+           <i class="fa-solid fa-tag mr-1"></i> ${item.matched_label || 'DB'} 
+         </span> 
+       </div> 
+       <div class="flex items-center flex-wrap gap-x-4 gap-y-2 text-xs text-gray-400 mt-2 border-b border-gray-700 pb-3 mb-3"> 
+         <span class="inline-flex items-center text-xs font-medium text-purple-300 bg-purple-900/50 border border-purple-700 px-2 py-0.5 rounded-full shadow"> 
+           <i class="fa-solid fa-satellite-dish mr-1.5"></i> ${item.source_name} 
+         </span> 
+         <span><i class="fa-solid fa-user mr-1"></i> ${item.by || 'N/A'}</span> 
+         <span><i class="fa-solid fa-clock mr-1"></i> ${postTime} UTC</span> 
+         ${viewSourceLink} 
+         <button class="send-to-slack-btn text-gray-400 hover:text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed transition-colors" ${!webhookUrl || isPending ? 'disabled' : ''} title="${!webhookUrl ? 'Enter a Slack Webhook URL' : isPending ? 'Summary not ready' : 'Send to Slack'}"> 
+           <i class="fa-brands fa-slack mr-1"></i> Send to Slack 
+         </button> 
+         <button class="find-related-btn text-gray-400 hover:text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed transition-colors" ${isPending ? 'disabled' : ''} title="${isPending ? 'Summary not ready' : 'Find related items'}"> 
+           <i class="fa-solid fa-brain mr-1"></i> Find Related 
+         </button> 
+       </div> 
+       <div class="summary-container"> 
+         <h3 class="text-sm font-semibold text-green-400 mb-2">AI Summary</h3> 
+         ${summaryHTML} 
+       </div> 
+     `; 
+     return card; 
+   }
     function updateAllSlackButtons() {
         const url = localStorage.getItem('slackWebhookUrl') || '';
         document.querySelectorAll('.feed-card .send-to-slack-btn').forEach(btn => {
@@ -1427,16 +1454,28 @@ function initializeApp() {
     }
 
     function handleViewSwitch(viewId) {
-        document.querySelectorAll('.view-content').forEach(v => v.classList.add('hidden'));
-        document.getElementById(viewId).classList.remove('hidden');
+  document.querySelectorAll('.view-content').forEach(v => v.classList.add('hidden'));
+  document.getElementById(viewId).classList.remove('hidden');
 
-        document.querySelectorAll('.view-tab-btn').forEach(b => b.classList.remove('active-view-tab'));
-        document.querySelector(`.view-tab-btn[data-view="${viewId}"]`).classList.add('active-view-tab');
+  document.querySelectorAll('.view-tab-btn').forEach(b => b.classList.remove('active-view-tab'));
+  document.querySelector(`.view-tab-btn[data-view="${viewId}"]`).classList.add('active-view-tab');
 
-        if (viewId === 'dashboard-view') {
-            fetchAndRenderDashboard(currentAnalyticsDate);
+  if (viewId === 'dashboard-view') {
+   fetchAndRenderDashboard(currentAnalyticsDate);
+  } else if (viewId === 'matches-view') {
+        // --- FIX START ---
+        // If the view hasn't been set up yet (event listeners, etc.), initialize it.
+        // The initialize function already performs the first data fetch.
+    if (!matchesState.isInitialized) {
+      initializeMatchesView();
+    } else {
+            // For every subsequent visit to the tab, force a fresh pull from the database.
+            // The `true` argument resets pagination and clears the current list.
+            fetchMatches(true);
         }
-    }
+        // --- FIX END ---
+  }
+ }
    
     function handleClearFeed() {
         tearDownTabs();
@@ -1499,6 +1538,212 @@ function initializeApp() {
             allCardsInPane.forEach(card => pane.appendChild(card));
         });
     }, 200);
+
+
+    // --- START: NEW Matches Database View Logic ---
+    function initializeMatchesView() {
+        if (!isMongoDbEnabled) {
+            ui.matchesPlaceholder.innerHTML = `
+                <i class="fas fa-database fa-3x text-red-500"></i>
+                <p class="mt-4 text-lg">Database Not Connected</p>
+                <p class="text-sm">The Matches Database requires a connection to MongoDB. Please configure it in your backend.</p>
+            `;
+            return;
+        }
+        
+        matchesState.isInitialized = true;
+        renderMatchesSourceFilters();
+        setupMatchesViewEventListeners();
+        setupMatchesInfiniteScroll();
+        fetchMatches(true); // Initial fetch
+    }
+
+    const fetchMatches = debounce(async (isReset = false) => {
+     if (matchesState.isLoading) return;
+
+     if (isReset) {
+       matchesState.currentPage = 1;
+       matchesState.totalPages = 1;
+       ui.matchesResultsContainer.innerHTML = '';
+     }
+
+     if (matchesState.currentPage > matchesState.totalPages) {
+       return; // No more pages
+     }
+
+     matchesState.isLoading = true;
+        // --- FIX IS HERE ---
+     // Only show the main placeholder spinner on a full reset/new search.
+     if (isReset) {
+       ui.matchesPlaceholder.innerHTML = `<i class="fa-solid fa-spinner fa-spin fa-2x"></i>`;
+     }
+
+     const params = new URLSearchParams({
+       page: matchesState.currentPage,
+       per_page: 20,
+       sort_order: matchesState.sortOrder,
+       sort_by: 'time',
+       query: matchesState.query
+     });
+     matchesState.sources.forEach(source => params.append('source_name', source));
+
+     try {
+       const response = await fetch(`/matches?${params.toString()}`);
+       if (!response.ok) throw new Error(`Server responded with status ${response.status}`);
+      
+       const { data, pagination } = await response.json();
+       matchesState.totalPages = pagination.total_pages;
+
+       if (pagination.total_items === 0) {
+         ui.matchesPlaceholder.innerHTML = `
+           <i class="fas fa-box-open fa-3x"></i>
+           <p class="mt-4 text-lg">No Matches Found</p>
+           <p class="text-sm">Try adjusting your search or filter criteria.</p>`;
+       } else if (isReset) {
+         ui.matchesPlaceholder.innerHTML = '';
+       }
+
+       renderMatches(data);
+       matchesState.currentPage++;
+
+     } catch (error) {
+       console.error("Failed to fetch matches:", error);
+       ui.matchesPlaceholder.innerHTML = `
+         <i class="fas fa-triangle-exclamation fa-3x text-red-500"></i>
+         <p class="mt-4 text-lg">Error Loading Matches</p>
+         <p class="text-sm">${error.message}</p>`;
+     } finally {
+       matchesState.isLoading = false;
+     }
+   }, 300);
+
+    function renderMatches(matches) {
+
+        matches.forEach(item => {
+            // The item from /matches won't have a matched_label, so createFeedCard will show 'DB'
+            const card = createFeedCard(item);
+            ui.matchesResultsContainer.appendChild(card);
+        });
+
+        if (matchesState.currentPage <= matchesState.totalPages) {
+            const newLoader = document.createElement('div');
+            newLoader.id = 'matches-loader';
+            newLoader.className = 'text-center py-8';
+            newLoader.innerHTML = `<i class="fa-solid fa-spinner fa-spin fa-2x"></i>`;
+            ui.matchesResultsContainer.appendChild(newLoader);
+        }
+
+        const loader = document.getElementById('matches-loader');
+        if (loader) loader.remove();
+    }
+
+    function renderMatchesSourceFilters() {
+        ui.matchesSourceFiltersContainer.innerHTML = '';
+        if (apiSources.length === 0) {
+            ui.matchesSourceFiltersContainer.innerHTML = '<p class="text-gray-500 italic text-xs">No sources configured.</p>';
+            return;
+        }
+        apiSources.forEach(source => {
+            const container = document.createElement('label');
+            container.className = 'flex items-center space-x-2 cursor-pointer hover:bg-gray-800 p-1 rounded';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'matches-filter-checkbox form-checkbox';
+            checkbox.dataset.value = source.name;
+            checkbox.checked = matchesState.sources.has(source.name);
+            const text = document.createElement('span');
+            text.textContent = source.name;
+            text.className = 'truncate';
+            container.append(checkbox, text);
+            ui.matchesSourceFiltersContainer.appendChild(container);
+        });
+    }
+
+    function updateMatchesFilterBadge() {
+        const count = matchesState.sources.size;
+        if (count > 0) {
+            ui.matchesFilterCountBadge.textContent = count;
+            ui.matchesFilterCountBadge.classList.remove('hidden');
+        } else {
+            ui.matchesFilterCountBadge.classList.add('hidden');
+        }
+    }
+
+    function setupMatchesInfiniteScroll() {
+        const options = {
+            root: ui.matchesResultsContainer.parentElement,
+            rootMargin: '0px',
+            threshold: 1.0
+        };
+
+        matchesScrollObserver = new IntersectionObserver((entries) => {
+            if (entries[0].isIntersecting && !matchesState.isLoading) {
+                fetchMatches();
+            }
+        }, options);
+
+        const loader = document.getElementById('matches-loader');
+        if (loader) matchesScrollObserver.observe(loader);
+
+        // Re-observe whenever content changes
+        const config = { childList: true };
+        const observerCallback = (mutationsList) => {
+            for (const mutation of mutationsList) {
+                if (mutation.type === 'childList') {
+                    const newLoader = document.getElementById('matches-loader');
+                    if (newLoader) {
+                        matchesScrollObserver.observe(newLoader);
+                    }
+                }
+            }
+        };
+        const mutationObserver = new MutationObserver(observerCallback);
+        mutationObserver.observe(ui.matchesResultsContainer, config);
+    }
+
+    function setupMatchesViewEventListeners() {
+        ui.matchesSearchInput.addEventListener('input', () => {
+            matchesState.query = ui.matchesSearchInput.value;
+            fetchMatches(true);
+        });
+
+        ui.matchesSortSelect.addEventListener('change', () => {
+            matchesState.sortOrder = ui.matchesSortSelect.value;
+            fetchMatches(true);
+        });
+
+        ui.matchesFilterBtn.addEventListener('click', () => {
+            ui.matchesFilterPopover.classList.toggle('hidden');
+        });
+
+        ui.matchesClearFiltersBtn.addEventListener('click', () => {
+            matchesState.sources.clear();
+            renderMatchesSourceFilters();
+            updateMatchesFilterBadge();
+            fetchMatches(true);
+        });
+        
+        ui.matchesFilterPopover.addEventListener('change', (e) => {
+            if (e.target.classList.contains('matches-filter-checkbox')) {
+                const { value } = e.target.dataset;
+                if (e.target.checked) {
+                    matchesState.sources.add(value);
+                } else {
+                    matchesState.sources.delete(value);
+                }
+                updateMatchesFilterBadge();
+                fetchMatches(true);
+            }
+        });
+        
+        // Hide popover on outside click
+        document.addEventListener('click', (e) => {
+             if (ui.matchesFilterPopover && !ui.matchesFilterBtn.contains(e.target) && !ui.matchesFilterPopover.contains(e.target)) {
+                ui.matchesFilterPopover.classList.add('hidden');
+            }
+        });
+    }
+    // --- END: NEW Matches Database View Logic ---
 
     function renderFilterOptions() {
         const createFilterCheckbox = (type, value) => {
@@ -1992,15 +2237,15 @@ function initializeApp() {
         });
     }
     
-    setupConfigControls();
-    setupManagementEventListeners();
-    setupFilterAndSortControls(); // Initialize new controls
-    initDashboard();
-    updateGlobalScanControls();
-    loadConfiguration().then(() => {
-        connectToStream();
-        updateControlsUI();
-    });
+    setupConfigControls(); 
+   setupManagementEventListeners(); 
+   setupFilterAndSortControls(); 
+   initDashboard(); 
+   updateGlobalScanControls(); 
+   loadConfiguration().then(() => { 
+     connectToStream(); 
+     updateControlsUI(); 
+   }); 
 }
 
 // --- Start the leader election process on page load ---

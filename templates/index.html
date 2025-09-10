@@ -55,6 +55,7 @@
     <div class="border-b brand-border flex items-center px-4 space-x-2">
         <button class="view-tab-btn active-view-tab" data-view="scanner-view"><i class="fa-solid fa-stream mr-2"></i>Scanner Feed</button>
         <button class="view-tab-btn" data-view="dashboard-view"><i class="fa-solid fa-chart-line mr-2"></i>Analytics Dashboard</button>
+        <button class="view-tab-btn" data-view="matches-view"><i class="fa-solid fa-database mr-2"></i>Matches Database</button>
     </div>
 
     <main class="flex-1 flex flex-col md:flex-row overflow-hidden">
@@ -141,7 +142,7 @@
                 <h2 class="text-2xl font-bold">Daily Analytics</h2>
                 <input id="analytics-date-picker" class="p-2 rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500" type="text" placeholder="Select Date">
             </div>
-            
+             
             <div id="local-storage-controls" class="hidden mb-4 p-3 bg-yellow-900/50 border border-yellow-700 rounded-lg flex items-center justify-between gap-4">
                 <p class="text-sm text-yellow-300"><i class="fa-solid fa-database mr-2"></i>Database not connected. Analytics are stored locally in your browser.</p>
                 <button id="clear-local-dashboard-btn" class="px-3 py-1 text-sm font-semibold rounded-md bg-red-800 hover:bg-red-700 transition-all shadow text-white whitespace-nowrap">
@@ -183,7 +184,7 @@
                     <div id="matches-by-label-chart-container" class="flex-grow flex items-center justify-center h-64 relative"></div>
                 </div>
             </div>
-            
+             
             <div class="brand-dark-bg border brand-border rounded-lg p-5 shadow-lg">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="font-semibold">Breakdown by Source & Label</h3>
@@ -191,10 +192,45 @@
                 </div>
                 <div class="overflow-x-auto"><table id="source-label-table" class="stats-table w-full text-sm text-left"></table></div>
             </div>
-            
+             
+        </div>
+        <div id="matches-view" class="hidden flex-1 flex-col overflow-hidden view-content">
+            <div class="flex flex-col h-full p-4 md:p-6 lg:p-8">
+                <h2 class="text-2xl font-bold mb-4">Matches Database</h2>
+                <div class="sticky top-0 bg-gray-900/80 backdrop-blur-sm z-10 py-3 flex items-center gap-2 md:gap-4 flex-wrap border-b brand-border -mt-4 -mx-8 px-8 mb-4">
+                     <div class="relative flex-grow" style="min-width: 250px;">
+                        <i class="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500"></i>
+                        <input type="search" id="matches-search-input" placeholder="Search title or summary..." class="w-full p-2 pl-10 text-sm rounded-md bg-gray-800 border brand-border focus:outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="relative">
+                        <button id="matches-filter-btn" class="px-3 py-2 text-sm font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow flex items-center gap-2">
+                            <i class="fa-solid fa-satellite-dish"></i>
+                            <span>Sources</span>
+                            <span id="matches-filter-count-badge" class="hidden h-5 w-5 text-xs bg-blue-600 rounded-full flex items-center justify-center">0</span>
+                        </button>
+                        <div id="matches-filter-popover" class="hidden absolute right-0 mt-2 w-64 bg-gray-900 border brand-border rounded-lg shadow-xl z-30 p-3 text-sm">
+                            <div class="flex justify-between items-center mb-2">
+                                <h4 class="font-semibold">Filter by Source</h4>
+                                <button id="matches-clear-filters-btn" class="text-xs text-blue-400 hover:underline">Clear</button>
+                            </div>
+                            <div id="matches-source-filters-container" class="space-y-1 max-h-64 overflow-y-auto pr-2">
+                            </div>
+                        </div>
+                    </div>
+                    <div>
+                         <select id="matches-sort-select" class="p-2 text-sm rounded-md bg-gray-700 border-transparent focus:outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="desc">Newest First</option>
+                            <option value="asc">Oldest First</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="matches-results-container" class="flex-1 overflow-y-auto space-y-6 pr-2 -mr-2">
+                </div>
+                <div id="matches-placeholder" class="text-center text-gray-500 py-16"></div>
+            </div>
         </div>
     </main>
-    
+     
     <div id="listener-modal"
         class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
         <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-lg mx-4 modal-content transform scale-95">
@@ -242,7 +278,7 @@
             </form>
         </div>
     </div>
-    
+     
     <div id="source-modal"
         class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
         <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-3xl mx-4 max-h-[90vh] flex flex-col modal-content transform scale-95">
@@ -341,7 +377,7 @@
                     </div>
                     <textarea id="source-field-mappings" class="hidden"></textarea>
                 </div>
-                
+                 
                 <div class="flex justify-end space-x-3 mt-6 pt-4 border-t brand-border">
                     <button type="button" id="cancel-source-btn" class="px-4 py-2 font-semibold rounded-md bg-gray-700 hover:bg-gray-600 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Cancel</button>
                     <button type="submit" id="save-source-btn" class="px-4 py-2 font-semibold rounded-md bg-blue-800 hover:bg-blue-700 transition-all shadow hover:shadow-lg transform hover:-translate-y-0.5">Save Source</button>
@@ -349,7 +385,7 @@
             </form>
         </div>
     </div>
-    
+     
     <div id="related-modal"
         class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 modal-overlay opacity-0">
         <div class="brand-dark-bg border brand-border rounded-lg shadow-2xl p-6 w-full max-w-3xl mx-4 max-h-[90vh] flex flex-col modal-content transform scale-95">
@@ -369,7 +405,7 @@
                     </summary>
                     <div class="mt-2 pt-2 border-t border-indigo-900 text-gray-400 space-y-2">
                         <p>This feature uses a powerful ranking algorithm called <strong>Reciprocal Rank Fusion (RRF)</strong> to intelligently combine the results from two different search methods.</p>
-                        
+                         
                         <p>Think of it like searching for a restaurant. You might use a review app that ranks by <em>taste</em> (like our <strong>Semantic Search</strong>, which understands meaning) and a map app that ranks by <em>distance</em> (like our <strong>Keyword Search</strong>, which matches words). RRF is the smart process that looks at both ranked lists to find the restaurant that is both highly-rated and nearby.</p>
 
                         <p>It works by looking at the <strong>rank</strong> (1st, 2nd, 3rd, etc.) of each item in both search results. An item scores highly if it appears near the top of <em>either</em> list. This means a great conceptual match won't get buried just because it's missing a keyword, and vice-versa. The result is a single, superior list that gives you deeper and more accurate insights. 🧠</p>

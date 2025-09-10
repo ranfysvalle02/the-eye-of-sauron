@@ -100,13 +100,19 @@ update_queue = queue.Queue()
 is_paused_due_to_rate_limit = threading.Event()
 is_manually_paused = threading.Event()
 is_scan_cancelled = threading.Event()
+# Add these two lines for deduplication
+processed_ids_lock = threading.Lock()
+processed_ids_this_session = set()
 
 # --- Service Configuration ---
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 25))
 PAGES_PER_SCAN = 10
 
-# Global executor for all background tasks
-global_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix='SauronWorker')
+# We now use two separate thread pools to prevent slow AI tasks
+# from blocking fast API scanning tasks.
+MAX_AI_WORKERS = int(os.getenv("MAX_AI_WORKERS", 5)) # A smaller, dedicated pool for LLM calls
+global_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix='SauronScanner')
+ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_AI_WORKERS, thread_name_prefix='SauronAIWorker')
 
 
 # --- Keyword Monitoring Configuration (Listeners) ---
@@ -528,21 +534,53 @@ def get_llm_summary(prompt_text):
             return f"[Error calling LLM: {e}]"
 
 def process_and_queue_api_item(item, matched_label, source_config):
-    logging.info(f"✅ API MATCH: Item from '{source_config['name']}' matched '{matched_label}'. Processing...")
+    """
+    Processes a matched item. It immediately sends a 'pending' card to the UI,
+    then submits the slow summary/embedding task to a separate AI worker thread pool.
+    """
     mappings = source_config.get('fieldMappings', {})
-    item_id = get_nested_value(item, mappings.get('id'))
+    item_id_from_source = get_nested_value(item, mappings.get('id'))
+    if not item_id_from_source:
+        logging.warning(f"Could not extract a unique ID from an item in '{source_config['name']}'. Skipping.")
+        return
+        
+    unique_item_id = f"{source_config['name']}-{item_id_from_source}"
+
+    with processed_ids_lock:
+        if unique_item_id in processed_ids_this_session:
+            return
+        processed_ids_this_session.add(unique_item_id)
+
+    if content_collection is not None:
+        existing_doc = content_collection.find_one({'_id': unique_item_id})
+        if existing_doc and existing_doc.get('ai_summary') and not existing_doc['ai_summary'].startswith(("[Error:", "[Status:")):
+            logging.info(f"🔁 Item {unique_item_id} already has a valid summary in DB. Using cached result.")
+            time_from_doc = existing_doc.get('time')
+            unix_timestamp = int(time_from_doc.timestamp()) if isinstance(time_from_doc, datetime) else 0
+
+            item_data = {
+                "id": unique_item_id, "type": "api_item", "source_name": source_config['name'],
+                "by": existing_doc.get('by'), "time": unix_timestamp,
+                "title": existing_doc.get('title'), "url": existing_doc.get('url'),
+                "text": get_nested_value(item, mappings.get('text')),
+                "matched_label": matched_label, "processed_at": datetime.utcnow().isoformat(),
+                "summary_status": "complete"
+            }
+            update_queue.put(item_data)
+            update_queue.put({"type": "summary_update", "id": unique_item_id, "ai_summary": existing_doc['ai_summary']})
+            return
+            
+    # --- Step 1: Immediately send the 'pending' card to the UI ---
+    logging.info(f"✅ NEW/UNSUMMARIZED: Item '{unique_item_id}' matched '{matched_label}'. Queueing for summary.")
     log_event_and_update_stats("item_matched", {
-        "sourceName": source_config.get('name'),
-        "matchedLabel": matched_label,
-        "itemId": str(item_id)
+        "sourceName": source_config.get('name'), "matchedLabel": matched_label, "itemId": str(item_id_from_source)
     })
 
     time_str = str(get_nested_value(item, mappings.get('time', '')))
     unix_timestamp = 0
     if time_str:
         try:
-            if time_str.isdigit():
-                unix_timestamp = int(time_str)
+            if time_str.isdigit(): unix_timestamp = int(time_str)
             else:
                 time_str = time_str.replace('Z', '+00:00')
                 if '.' in time_str:
@@ -554,60 +592,54 @@ def process_and_queue_api_item(item, matched_label, source_config):
             logging.warning(f"Could not parse timestamp '{time_str}': {e}")
 
     item_data = {
-        "id": f"{source_config['name']}-{item_id}",
-        "type": "api_item", "source_name": source_config['name'],
+        "id": unique_item_id, "type": "api_item", "source_name": source_config['name'],
         "by": get_nested_value(item, mappings.get('by')), "time": unix_timestamp,
-        "title": get_nested_value(item, mappings.get('title')),
-        "url": get_nested_value(item, mappings.get('url')),
-        "text": get_nested_value(item, mappings.get('text')),
-        "matched_label": matched_label, "processed_at": datetime.utcnow().isoformat(),
-        "summary_status": "pending"
+        "title": get_nested_value(item, mappings.get('title')), "url": get_nested_value(item, mappings.get('url')),
+        "text": get_nested_value(item, mappings.get('text')), "matched_label": matched_label,
+        "processed_at": datetime.utcnow().isoformat(), "summary_status": "pending"
     }
     update_queue.put(item_data)
 
-    # --- OPTIMIZATION: Check for existing summary before calling LLM ---
-    if content_collection is not None:
-        existing_doc = content_collection.find_one({'_id': item_data['id']})
-        # Check if the document exists and has a valid summary
-        if existing_doc and existing_doc.get('ai_summary') and not existing_doc['ai_summary'].startswith("[Error:"):
-            logging.info(f"🔁 Item {item_data['id']} already summarized. Skipping LLM call and using cached result.")
-            # Send the existing summary directly to the UI
-            update_queue.put({"type": "summary_update", "id": item_data["id"], "ai_summary": existing_doc['ai_summary']})
-            return # Exit the function early
+    # --- Step 2: Define the slow work and submit it to the AI worker pool ---
+    def generate_summary_and_update():
+        """This function runs in the separate `ai_executor` pool."""
+        if is_manually_paused.is_set() or is_scan_cancelled.is_set():
+            logging.info(f"Summary generation for item {item_data['id']} halted due to pause/cancel.")
+            with processed_ids_lock:
+                processed_ids_this_session.discard(unique_item_id)
+            return
 
-    if is_manually_paused.is_set() or is_scan_cancelled.is_set():
-        logging.info(f"Summary generation for item {item_data['id']} halted due to pause or cancellation.")
-        return
+        content_to_summarize = f"Title: {item_data['title']}\n\nContent:\n{item_data['text']}"
+        prompt_text = (f"## Matched Keyword\n`{matched_label}`\n\n"
+                       f"## API Content to Analyze (from {source_config['name']})\n\n{content_to_summarize}")
+        
+        ai_summary = get_llm_summary(prompt_text)
+        
+        summary_successful = not ai_summary.startswith(("[Error:", "[Status:"))
+        log_event_and_update_stats("summary_generated", {
+            "sourceName": source_config.get('name'), "itemId": item_data["id"],
+            "success": summary_successful, "error": ai_summary if not summary_successful else None
+        })
 
-    content_to_summarize = f"Title: {item_data['title']}\n\nContent:\n{item_data['text']}"
-    prompt_text = (f"## Matched Keyword\n`{matched_label}`\n\n"
-                   f"## API Content to Analyze (from {source_config['name']})\n\n{content_to_summarize}")
-    
-    ai_summary = get_llm_summary(prompt_text)
-    
-    summary_successful = not ai_summary.startswith("[Error:") and not ai_summary.startswith("[Status:")
-    log_event_and_update_stats("summary_generated", {
-        "sourceName": source_config.get('name'), "itemId": item_data["id"],
-        "success": summary_successful, "error": ai_summary if not summary_successful else None
-    })
-
-    # --- HYBRID SEARCH INTEGRATION ---
-    if summary_successful and content_collection is not None:
-        text_to_embed = f"Title: {item_data['title']}\nSummary: {ai_summary}"
-        embedding = get_embedding(text_to_embed)
-        if embedding:
+        if summary_successful and content_collection is not None:
+            text_to_embed = f"Title: {item_data['title']}\nSummary: {ai_summary}"
+            embedding = get_embedding(text_to_embed)
             doc_to_store = {
                 "title": item_data['title'], "url": item_data['url'], "by": item_data['by'],
                 "time": datetime.fromtimestamp(item_data['time']), "source_name": item_data['source_name'],
-                "ai_summary": ai_summary, "content_embedding": embedding
+                "ai_summary": ai_summary
             }
+            if embedding:
+                doc_to_store["content_embedding"] = embedding
             try:
                 content_collection.update_one({'_id': item_data['id']}, {'$set': doc_to_store}, upsert=True)
-                logging.info(f"📝 Stored item {item_data['id']} with embedding for hybrid search.")
+                logging.info(f"📝 Stored item {item_data['id']} for hybrid search.")
             except Exception as e:
                 logging.error(f"❌ Failed to store item {item_data['id']} for hybrid search: {e}")
+        
+        update_queue.put({"type": "summary_update", "id": item_data["id"], "ai_summary": ai_summary})
 
-    update_queue.put({"type": "summary_update", "id": item_data["id"], "ai_summary": ai_summary})
+    ai_executor.submit(generate_summary_and_update)
 
 
 def check_if_item_matches(item, source_config):
@@ -1041,6 +1073,115 @@ def get_daily_stats():
     except Exception as e:
         logging.error(f"Failed to fetch daily stats: {e}")
         return jsonify({"error": "An error occurred while fetching analytics data."}), 500
+
+@app.route('/matches', methods=['GET'])
+def get_matches():
+    """
+    An endpoint to retrieve, filter, sort, and paginate through the stored matches (content items).
+    
+    Query Parameters:
+    - page (int): The page number to retrieve. Default: 1.
+    - per_page (int): The number of items per page. Default: 20, Max: 100.
+    - sort_by (str): The field to sort by. Default: 'time'.
+    - sort_order (str): The sort direction ('asc' or 'desc'). Default: 'desc'.
+    - source_name (str): Filter results by specific source names. Can be provided multiple times.
+    - query (str): A search term to filter results by title or AI summary.
+    """
+    if content_collection is None:
+        return jsonify({"error": "Database not configured. This feature is unavailable."}), 503
+
+    try:
+        # --- 1. Parse and Validate Request Arguments ---
+        page = request.args.get('page', 1, type=int)
+        if page < 1: page = 1
+
+        per_page = request.args.get('per_page', 20, type=int)
+        # Add a reasonable cap to per_page to prevent abuse
+        if per_page > 100: per_page = 100
+        if per_page < 1: per_page = 1
+
+        sort_by = request.args.get('sort_by', 'time', type=str)
+        sort_order_str = request.args.get('sort_order', 'desc', type=str).lower()
+        sort_direction = DESCENDING if sort_order_str == 'desc' else ASCENDING
+
+        # --- 2. Build the MongoDB Filter Query ---
+        query_filter = {}
+        
+        # --- MODIFICATION START: Correctly handle multiple source_name parameters ---
+        # Use getlist() to capture all values for the 'source_name' parameter
+        source_name_list = request.args.getlist('source_name')
+        if source_name_list:
+            # Use the '$in' operator to match documents where source_name is in the provided list
+            query_filter['source_name'] = {'$in': source_name_list}
+        # --- MODIFICATION END ---
+
+        # Filter by a text search query if provided
+        search_query = request.args.get('query', type=str)
+        if search_query:
+            # Use regex for a simple, case-insensitive search on title and summary
+            regex_pattern = re.compile(search_query, re.IGNORECASE)
+            query_filter['$or'] = [
+                {'title': {'$regex': regex_pattern}},
+                {'ai_summary': {'$regex': regex_pattern}}
+            ]
+            
+    
+        # --- 3. Execute Queries for Data and Pagination ---
+        
+        # First, get the total count of documents that match the filter for pagination purposes
+        total_items = content_collection.count_documents(query_filter)
+        if total_items == 0:
+            return jsonify({
+                "pagination": {"page": page, "per_page": per_page, "total_items": 0, "total_pages": 0},
+                "data": []
+            })
+        
+        total_pages = (total_items + per_page - 1) // per_page # Integer division to get ceiling
+        
+        # Calculate the number of documents to skip
+        skip_items = (page - 1) * per_page
+        
+        # Now, retrieve the paginated and sorted documents
+        cursor = content_collection.find(query_filter)\
+                                 .sort(sort_by, sort_direction)\
+                                 .skip(skip_items)\
+                                 .limit(per_page)
+
+        # --- 4. Format the Results for JSON Response ---
+        results = []
+        for doc in cursor:
+            # Convert non-serializable types to strings/numbers
+            doc['id'] = str(doc['_id'])
+            del doc['_id'] # Remove the original BSON ObjectId
+            
+            # Convert datetime to ISO 8601 string format
+            if 'time' in doc and isinstance(doc.get('time'), datetime):
+                doc['time'] = doc['time'].isoformat()
+            
+            # The 'content_embedding' can be large, so we exclude it from this general-purpose endpoint
+            if 'content_embedding' in doc:
+                del doc['content_embedding']
+
+            results.append(doc)
+            
+        # --- 5. Return the Final Structured Response ---
+        response_data = {
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total_items": total_items,
+                "total_pages": total_pages
+            },
+            "data": results
+        }
+        return jsonify(response_data)
+
+    except OperationFailure as e:
+        logging.error(f"Error fetching matches from database: {e.details}")
+        return jsonify({"error": f"A database error occurred: {e.details}"}), 500
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in get_matches: {e}")
+        return jsonify({"error": "An unexpected server error occurred."}), 500
 
 if __name__ == '__main__':
     host = os.getenv('FLASK_HOST', '127.0.0.1')

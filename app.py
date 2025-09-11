@@ -17,7 +17,7 @@ import requests
 from functools import reduce
 import operator
 import voyageai
-from pymongo import MongoClient, DESCENDING
+from pymongo import MongoClient, DESCENDING, ASCENDING
 from pymongo.errors import ConnectionFailure, OperationFailure, ConfigurationError
 
 # --- Initialization & Configuration ---
@@ -415,21 +415,32 @@ def create_hybrid_search_indexes():
         # 2. FIX: Create or Recreate Vector Search Index with dimension check
         recreate_vector_index = False
         if VECTOR_INDEX_NAME in existing_indexes:
-            try:
-                # Check for dimension mismatch
-                index_def = existing_indexes[VECTOR_INDEX_NAME]['definition']
-                existing_dims = index_def['mappings']['fields']['content_embedding']['dimensions']
-                if existing_dims != EMBEDDING_DIMENSIONS:
-                    logging.warning(
-                        f"⚠️ Vector index '{VECTOR_INDEX_NAME}' dimension mismatch! "
-                        f"Index has {existing_dims}, but config requires {EMBEDDING_DIMENSIONS}. Recreating index."
-                    )
+            index_details = existing_indexes[VECTOR_INDEX_NAME]
+            # Safely get the definition. It might be None if the index is still pending.
+            # The correct key from the API is 'latestDefinition'.
+            index_def = index_details.get('latestDefinition')
+
+            if index_def:
+                try:
+                    # Now that we know index_def exists, we can safely access its nested keys.
+                    existing_dims = index_def['mappings']['fields']['content_embedding']['dimensions']
+                    if existing_dims != EMBEDDING_DIMENSIONS:
+                        logging.warning(
+                            f"⚠️ Vector index '{VECTOR_INDEX_NAME}' dimension mismatch! "
+                            f"Index has {existing_dims}, but config requires {EMBEDDING_DIMENSIONS}. Recreating index."
+                        )
+                        content_collection.drop_search_index(VECTOR_INDEX_NAME)
+                        recreate_vector_index = True
+                    else:
+                        logging.info(f"ℹ️ Vector index '{VECTOR_INDEX_NAME}' already exists and dimensions match.")
+                except KeyError as e:
+                    # This handles cases where the definition exists but has an unexpected structure.
+                    logging.warning(f"Could not parse the structure of existing vector index '{VECTOR_INDEX_NAME}'. Recreating it. Error: Missing key {e}")
                     content_collection.drop_search_index(VECTOR_INDEX_NAME)
                     recreate_vector_index = True
-                else:
-                    logging.info(f"ℹ️ Vector index '{VECTOR_INDEX_NAME}' already exists and dimensions match.")
-            except (KeyError, TypeError) as e:
-                logging.warning(f"Could not parse existing vector index '{VECTOR_INDEX_NAME}'. Recreating it. Error: {e}")
+            else:
+                # This handles the original problem: the index exists but its definition isn't available yet.
+                logging.warning(f"Existing vector index '{VECTOR_INDEX_NAME}' found but its definition is not yet available (likely pending). Recreating it to be safe.")
                 content_collection.drop_search_index(VECTOR_INDEX_NAME)
                 recreate_vector_index = True
         else:
@@ -1107,13 +1118,11 @@ def get_matches():
         # --- 2. Build the MongoDB Filter Query ---
         query_filter = {}
         
-        # --- MODIFICATION START: Correctly handle multiple source_name parameters ---
-        # Use getlist() to capture all values for the 'source_name' parameter
+        # Correctly handle multiple source_name parameters
         source_name_list = request.args.getlist('source_name')
         if source_name_list:
             # Use the '$in' operator to match documents where source_name is in the provided list
             query_filter['source_name'] = {'$in': source_name_list}
-        # --- MODIFICATION END ---
 
         # Filter by a text search query if provided
         search_query = request.args.get('query', type=str)
@@ -1210,3 +1219,4 @@ if __name__ == '__main__':
     print("👉 Open the URL in your browser to get started!")
     print("--------------------------------------------------")
     app.run(host=host, port=port, debug=False, threaded=True)
+

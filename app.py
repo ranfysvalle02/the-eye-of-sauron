@@ -105,7 +105,7 @@ processed_ids_lock = threading.Lock()
 processed_ids_this_session = set()
 
 # --- Service Configuration ---
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", 25))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 5))
 PAGES_PER_SCAN = 10
 
 # We now use two separate thread pools to prevent slow AI tasks
@@ -127,66 +127,7 @@ patterns_lock = threading.Lock()
 
 # --- API Source Configuration ---
 DEFAULT_API_SOURCES = json.dumps([
-    {
-        "name": "LangChain GitHub Issues",
-        "apiUrl": "https://api.github.com/repos/langchain-ai/langchain/issues?state=all&per_page=100&page={PAGE}",
-        "httpMethod": "GET",
-        "paginationStyle": "page_number",
-        "dataRoot": "",
-        "fieldMappings": {
-            "id": "id", "title": "title", "url": "html_url",
-            "text": "body", "by": "user.login", "time": "created_at"
-        },
-        "fieldsToCheck": ["title", "body"]
-    },
-    {
-        "name": "Hacker News 'AI' Stories",
-        "apiUrl": "https://hn.algolia.com/api/v1/search_by_date?query=ai&tags=story&page={PAGE}",
-        "httpMethod": "GET",
-        "paginationStyle": "page_number",
-        "paginationZeroIndexed": True,
-        "dataRoot": "hits",
-        "fieldMappings": {
-            "id": "objectID", "title": "title", "url": "url",
-            "text": "story_text", "by": "author", "time": "created_at"
-        },
-        "fieldsToCheck": ["title", "story_text"]
-    },
-    {
-        "name": "Hacker News 'AI' Comments",
-        "apiUrl": "https://hn.algolia.com/api/v1/search_by_date?query=ai&tags=comment&page={PAGE}",
-        "httpMethod": "GET",
-        "paginationStyle": "page_number",
-        "paginationZeroIndexed": True,
-        "dataRoot": "hits",
-        "fieldMappings": {
-            "id": "objectID", "title": "story_title", "url": "story_url",
-            "text": "comment_text", "by": "author", "time": "created_at"
-        },
-        "fieldsToCheck": ["story_title", "comment_text"]
-    },
-    {
-        "id": "medium-tag",
-        "name": "Medium Tag Search",
-        "description": "Searches for recent posts with a specific tag on Medium.",
-        "variables": [
-            {"name": "Tag", "key": "{TAG}", "placeholder": "e.g., programming"}
-        ],
-        "config": {
-            "name": "Medium Tag '{TAG}'",
-            "apiUrl": "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fmedium.com%2Ffeed%2Ftag%2F{TAG}",
-            "dataRoot": "items",
-            "fieldMappings": {
-                "id": "guid",
-                "title": "title",
-                "url": "link",
-                "text": "description",
-                "by": "author",
-                "time": "pubDate"
-            },
-            "fieldsToCheck": ["title", "description"]
-        }
-    }
+    
 ])
 API_SOURCES = {}
 sources_lock = threading.Lock()
@@ -569,11 +510,12 @@ def process_and_queue_api_item(item, matched_label, source_config):
             time_from_doc = existing_doc.get('time')
             unix_timestamp = int(time_from_doc.timestamp()) if isinstance(time_from_doc, datetime) else 0
 
+            # --- FIX: Use data from the database for consistency ---
             item_data = {
                 "id": unique_item_id, "type": "api_item", "source_name": source_config['name'],
                 "by": existing_doc.get('by'), "time": unix_timestamp,
                 "title": existing_doc.get('title'), "url": existing_doc.get('url'),
-                "text": get_nested_value(item, mappings.get('text')),
+                "text": existing_doc.get('text'),  # <-- Use the stored text
                 "matched_label": matched_label, "processed_at": datetime.utcnow().isoformat(),
                 "summary_status": "complete"
             }
@@ -587,26 +529,42 @@ def process_and_queue_api_item(item, matched_label, source_config):
         "sourceName": source_config.get('name'), "matchedLabel": matched_label, "itemId": str(item_id_from_source)
     })
 
+    # --- Extract core fields from the item ---
+    title_val = get_nested_value(item, mappings.get('title'))
+    url_val = get_nested_value(item, mappings.get('url'))
+    by_val = get_nested_value(item, mappings.get('by'))
+    text_val = get_nested_value(item, mappings.get('text'))
     time_str = str(get_nested_value(item, mappings.get('time', '')))
+
+    # --- FIX: If URL is missing, construct a fallback for specific sources like Hacker News ---
+    if not url_val:
+        source_name = source_config.get('name', '')
+        if 'Hacker News' in source_name:
+            object_id = get_nested_value(item, mappings.get('id'))
+            if object_id:
+                url_val = f"https://news.ycombinator.com/item?id={object_id}"
+                logging.info(f"Constructed fallback URL for HN item {object_id}: {url_val}")
+
+    # --- Parse timestamp ---
     unix_timestamp = 0
     if time_str:
         try:
             if time_str.isdigit(): unix_timestamp = int(time_str)
             else:
-                time_str = time_str.replace('Z', '+00:00')
-                if '.' in time_str:
-                    parts = time_str.split('.')
+                time_str_cleaned = time_str.replace('Z', '+00:00')
+                if '.' in time_str_cleaned:
+                    parts = time_str_cleaned.split('.')
                     if len(parts) > 1 and len(parts[1]) > 6:
-                        time_str = parts[0] + '.' + parts[1][:6]
-                unix_timestamp = int(datetime.fromisoformat(time_str).timestamp())
+                        time_str_cleaned = parts[0] + '.' + parts[1][:6]
+                unix_timestamp = int(datetime.fromisoformat(time_str_cleaned).timestamp())
         except (ValueError, TypeError) as e:
             logging.warning(f"Could not parse timestamp '{time_str}': {e}")
 
+    # --- Prepare and queue the initial item data for the UI ---
     item_data = {
         "id": unique_item_id, "type": "api_item", "source_name": source_config['name'],
-        "by": get_nested_value(item, mappings.get('by')), "time": unix_timestamp,
-        "title": get_nested_value(item, mappings.get('title')), "url": get_nested_value(item, mappings.get('url')),
-        "text": get_nested_value(item, mappings.get('text')), "matched_label": matched_label,
+        "by": by_val, "time": unix_timestamp, "title": title_val, "url": url_val,
+        "text": text_val, "matched_label": matched_label,
         "processed_at": datetime.utcnow().isoformat(), "summary_status": "pending"
     }
     update_queue.put(item_data)
@@ -635,11 +593,18 @@ def process_and_queue_api_item(item, matched_label, source_config):
         if summary_successful and content_collection is not None:
             text_to_embed = f"Title: {item_data['title']}\nSummary: {ai_summary}"
             embedding = get_embedding(text_to_embed)
+            
+            # --- FIX: Save the original text to the database ---
             doc_to_store = {
-                "title": item_data['title'], "url": item_data['url'], "by": item_data['by'],
-                "time": datetime.fromtimestamp(item_data['time']), "source_name": item_data['source_name'],
-                "ai_summary": ai_summary
+                "title": item_data['title'], 
+                "url": item_data['url'], 
+                "by": item_data['by'],
+                "time": datetime.fromtimestamp(item_data['time']), 
+                "source_name": item_data['source_name'],
+                "ai_summary": ai_summary,
+                "text": item_data['text']  # <-- Save the original text
             }
+
             if embedding:
                 doc_to_store["content_embedding"] = embedding
             try:
@@ -1219,4 +1184,3 @@ if __name__ == '__main__':
     print("👉 Open the URL in your browser to get started!")
     print("--------------------------------------------------")
     app.run(host=host, port=port, debug=False, threaded=True)
-
